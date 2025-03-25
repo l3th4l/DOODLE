@@ -122,6 +122,6 @@ This project is inspired by ARTIST and made at the German Aerospace Center (DLR)
 
 -----------
 <div align="center">
-  <a href="https://www.dlr.de/EN/Home/home_node.html"><img src="./static/media/Logo-en.bc10c5b6.svg" height="50px" hspace="3%" vspace="25px"></a>
+  <a href="https://www.dlr.de/EN/Home/home_node.html"><img src="https://www.dlr.de/static/media/Logo-en.bc10c5b6.svg" height="80px" hspace="3%" vspace="25px"></a>
 
 </div>
