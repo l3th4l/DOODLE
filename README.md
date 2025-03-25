@@ -1,5 +1,5 @@
 <p align="center">
-<img src="./images/Doodle.png" alt="logo" width="500"/>
+<img src="./images/Doodle.png" alt="logo" width="800"/>
 </p>
 
 # DOODLE (Not an acronym): Differentiable Heliostat Environment
