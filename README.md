@@ -77,7 +77,7 @@ A main function is provided in `main.py` to test the environment. It will:
 
     **Predicted Flux Heatmap**
     <p align="center">
-    <img src="./images/render.png" alt="logo" width="900"/>
+    <img src="./images/render.png" alt="logo" width="500"/>
     </p>
 
 To run the example:
