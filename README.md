@@ -1,5 +1,5 @@
 <p align="center">
-<img src="./images/Doodle.png" alt="logo" width="1000"/>
+<img src="./images/Doodle.png" alt="logo" width="500"/>
 </p>
 
 # DOODLE (Not an acronym): Differentiable Heliostat Environment
@@ -72,12 +72,12 @@ A main function is provided in `main.py` to test the environment. It will:
 4. Render the corresponding heatmaps and 3D visualizations with the target area surface overlay.
     **Field Visualization**
     <p align="center">
-    <img src="./images/Figure_1.png" alt="logo" width="900"/>
+    <img src="./images/Figure_1.png" alt="logo" width="300"/>
     </p>
 
     **Predicted Flux Heatmap**
     <p align="center">
-    <img src="./images/render.png" alt="logo" width="500"/>
+    <img src="./images/render.png" alt="logo" width="200"/>
     </p>
 
 To run the example:
@@ -122,6 +122,6 @@ This project is inspired by ARTIST and made at the German Aerospace Center (DLR)
 
 -----------
 <div align="center">
-  <a href="https://www.dlr.de/EN/Home/home_node.html"><img src="./logos/logo_dlr.svg" height="50px" hspace="3%" vspace="25px"></a>
+  <a href="https://www.dlr.de/EN/Home/home_node.html"><img src="./static/media/Logo-en.bc10c5b6.svg" height="50px" hspace="3%" vspace="25px"></a>
 
 </div>
