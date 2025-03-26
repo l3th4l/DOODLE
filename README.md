@@ -42,7 +42,7 @@ pip install torch gym numpy matplotlib
 
 ## Project Structure
 
-- **`differentiable_heliostat_env.py`**  
+- **`env.py`**  
   Contains the `DifferentiableHeliostatEnv` class implementing the Gym environment.
   
 - **`utils.py`**  
@@ -50,14 +50,11 @@ pip install torch gym numpy matplotlib
   - `reflect_ray`
   - `calculate_normals`
   - `calculate_target_coordinates`
-  - `global_to_gaussian_blobs` (implemented as a method in the `TargetArea` class)
   - `display` for 3D visualization
   
 - **`target_area.py`**  
   Contains the `TargetArea` class for target area coordinate conversions and rendering.
-  
-- **`main.py`**  
-  An example script that tests the environment with both control methods and displays the resulting heatmaps and 3D visualizations.
+  - `global_to_gaussian_blobs` (implemented as a method in the `TargetArea` class)
 
 ## Usage
 
@@ -117,7 +114,7 @@ Despite its simplifications, this environment is differentiable and extremely fa
 
 ## Acknowledgements
 
-This project is inspired by ARTIST and made at the German Aerospace Center (DLR) and the need for differentiable simulation environments in heliostat control.
+This project is inspired by ARTIST and the need for differentiable simulation environments in heliostat control, and has been made at the German Aerospace Center (DLR).
 
 
 -----------
