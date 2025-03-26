@@ -47,16 +47,13 @@ class TargetArea:
 
     def global_to_gaussian_blobs(self, coords, image_size=(64, 64), sigma=0.35, amplitude=1.0):
         relative_coords = self.global_to_relative(coords)
-        print(relative_coords)
 
         x_step = self.width / image_size[0]
         y_step = self.height / image_size[1]
             
         ys = torch.arange(0, self.height, step = y_step, device=coords.device, dtype=torch.float32)
         xs = torch.arange(0, self.width, step = x_step, device=coords.device, dtype=torch.float32)
-
-        print(ys, xs)
-
+        
         ys, xs = torch.meshgrid(ys, xs, indexing="ij")
         xs = xs.unsqueeze(-1)
         ys = ys.unsqueeze(-1)

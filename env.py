@@ -18,11 +18,11 @@ class DifferentiableHeliostatEnv(gym.Env):
     The observation is a concatenation of the flattened rendered heatmap, the flattened reflector normals,
     the flattened heliostat positions, and the flattened sun position.
     """
-    def __init__(self, control_method="aim_point", device=torch.device("cpu")):
+    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu")):
         super().__init__()
         self.control_method = control_method
         self.device = device
-        self.num_heliostats = 3
+        self.num_heliostats = num_heliostats
 
         # Placeholder for heliostat positions (will be set in reset)
         self.heliostat_positions = torch.zeros((self.num_heliostats, 3), device=self.device)
@@ -31,17 +31,19 @@ class DifferentiableHeliostatEnv(gym.Env):
         # Create a TargetArea instance (center is fixed at (0, height, 0) in meters)
         self.target_area = TargetArea(height=15.0, width=10.0)
         # Maximum number of steps per episode.
-        self.max_steps = 100
+        self.max_steps = max_steps
         self.current_step = 0
 
         # Define action space: for either control method, we use 2 dimensions per heliostat.
         act_dim = 2 * self.num_heliostats
+        self.act_dim = act_dim
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(act_dim,), dtype=np.float32)
 
         # Define observation space:
         # For example, we render a heatmap of size (40, 60) -> 2400 elements,
         # plus normals (3*num_heliostats), heliostat positions (3*num_heliostats), and sun (3).
         obs_dim = 2400 + 6 * self.num_heliostats + 3
+        self.obs_dim = obs_dim
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # Initialize placeholders for current computed values.
