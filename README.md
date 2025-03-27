@@ -4,7 +4,7 @@
 
 # DOODLE (Not an acronym): Differentiable Heliostat Environment
 
-This project implements a fully differentiable Gym environment for heliostat control. It provides a simplified, extremely fast “ray-tracer” that approximates a small fraction of what [ARTIST](https://github.com/ARTIST-Association/ARTIST) does—though it does it worse. However, it can be used to train policies using differentiable reinforcement learning, which can then be fine-tuned on ARTIST for more realistic performance.
+This project implements a fully differentiable Gymnasium environment for heliostat control. It provides a simplified, extremely fast “ray-tracer” that approximates a small fraction of what [ARTIST](https://github.com/ARTIST-Association/ARTIST) does—though it does it worse. However, it can be used to train policies using differentiable reinforcement learning, which can then be fine-tuned on ARTIST for more realistic performance.
 
 ## Key Characteristics
 
@@ -24,40 +24,37 @@ This project implements a fully differentiable Gym environment for heliostat con
 - **Differentiable Simulation:** End-to-end differentiability enables integration with modern RL and optimization algorithms.
 - **Target Area Rendering:** Heatmaps are generated using Gaussian blobs based on computed target positions.
 - **3D Visualization:** A `display` function visualizes heliostat positions, reflection rays, and the target area surface in 3D.
-- **Gym Environment Interface:** Compliant with the OpenAI Gym API for `reset`, `step`, and `render`.
+- **Gymnasium Environment Interface:** Compliant with the Gymnasium API for `reset`, `step`, and `render`.
 
 ## Requirements
 
 - Python 3.7+
 - [PyTorch](https://pytorch.org/)
-- [Gym](https://github.com/openai/gym)
+- [Gymnasium](https://github.com/Farama-Foundation/Gymnasium)
 - NumPy
 - Matplotlib
 
 Install dependencies via pip:
 
 ```bash
-pip install torch gym numpy matplotlib
+pip install torch gymnasium numpy matplotlib
 ```
 
 ## Project Structure
 
-- **`differentiable_heliostat_env.py`**  
-  Contains the `DifferentiableHeliostatEnv` class implementing the Gym environment.
+- **`env.py`**  
+  Contains the `DifferentiableHeliostatEnv` class implementing the Gymnasium environment.
   
 - **`utils.py`**  
   Provides helper functions such as:
   - `reflect_ray`
   - `calculate_normals`
   - `calculate_target_coordinates`
-  - `global_to_gaussian_blobs` (implemented as a method in the `TargetArea` class)
   - `display` for 3D visualization
   
 - **`target_area.py`**  
   Contains the `TargetArea` class for target area coordinate conversions and rendering.
-  
-- **`main.py`**  
-  An example script that tests the environment with both control methods and displays the resulting heatmaps and 3D visualizations.
+  - `global_to_gaussian_blobs` (implemented as a method in the `TargetArea` class)
 
 ## Usage
 
@@ -117,7 +114,7 @@ Despite its simplifications, this environment is differentiable and extremely fa
 
 ## Acknowledgements
 
-This project is inspired by ARTIST and made at the German Aerospace Center (DLR) and the need for differentiable simulation environments in heliostat control.
+This project is inspired by ARTIST and the need for differentiable simulation environments in heliostat control, and has been made at the German Aerospace Center (DLR).
 
 
 -----------
