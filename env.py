@@ -6,7 +6,6 @@ from gymnasium import spaces
 from utils import reflect_ray, calculate_normals, display
 # Assume that TargetArea and display are also imported from utils
 from target_area import TargetArea, calculate_target_coordinates
-
 class DifferentiableHeliostatEnv(gym.Env):
     """
     A completely differentiable gym environment for heliostat control.
@@ -15,14 +14,20 @@ class DifferentiableHeliostatEnv(gym.Env):
       - "aim_point": Actions shift the target coordinates (aim points).
       - "m_pos": Actions represent angular changes (rotations) applied to the reflector normals.
     
-    The observation is a concatenation of the flattened rendered heatmap, the flattened reflector normals,
-    the flattened heliostat positions, and the flattened sun position.
+    The observation is a concatenation of the flattened rendered heatmap, the flattened reflector normals
+    (possibly with added sensor error), the flattened heliostat positions, and the flattened sun position.
     """
-    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu")):
+    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, error_magnitude=0, device=torch.device("cpu")):
         super().__init__()
         self.control_method = control_method
         self.device = device
         self.num_heliostats = num_heliostats
+
+        # Check and store error magnitude.
+        if error_magnitude < 0:
+            raise ValueError("error_magnitude cannot be negative")
+        self.error_magnitude = error_magnitude
+        self.add_errors = error_magnitude > 0
 
         # Placeholder for heliostat positions (will be set in reset)
         self.heliostat_positions = torch.zeros((self.num_heliostats, 3), device=self.device)
@@ -51,16 +56,54 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_reflections = torch.zeros((self.num_heliostats, 3), device=self.device)
         self.current_targets = torch.zeros((self.num_heliostats, 3), device=self.device)
         self.current_heatmap = torch.zeros((40, 60), device=self.device)
+        # If errors are enabled, placeholder for error angles.
+        self.error_angles = None
+
+    def _apply_error(self, normals, error_angles):
+        """
+        Rotate each normal by the corresponding error_angles (Euler angles in radians).
+        normals: (N, 3) and error_angles: (N, 3)
+        Returns rotated normals of shape (N, 3).
+        """
+        N = normals.shape[0]
+        cos_x = torch.cos(error_angles[:, 0])
+        sin_x = torch.sin(error_angles[:, 0])
+        R_x = torch.zeros((N, 3, 3), device=self.device)
+        R_x[:, 0, 0] = 1
+        R_x[:, 1, 1] = cos_x
+        R_x[:, 1, 2] = -sin_x
+        R_x[:, 2, 1] = sin_x
+        R_x[:, 2, 2] = cos_x
+
+        cos_y = torch.cos(error_angles[:, 1])
+        sin_y = torch.sin(error_angles[:, 1])
+        R_y = torch.zeros((N, 3, 3), device=self.device)
+        R_y[:, 0, 0] = cos_y
+        R_y[:, 0, 2] = sin_y
+        R_y[:, 1, 1] = 1
+        R_y[:, 2, 0] = -sin_y
+        R_y[:, 2, 2] = cos_y
+
+        cos_z = torch.cos(error_angles[:, 2])
+        sin_z = torch.sin(error_angles[:, 2])
+        R_z = torch.zeros((N, 3, 3), device=self.device)
+        R_z[:, 0, 0] = cos_z
+        R_z[:, 0, 1] = -sin_z
+        R_z[:, 1, 0] = sin_z
+        R_z[:, 1, 1] = cos_z
+        R_z[:, 2, 2] = 1
+
+        R = torch.bmm(R_z, torch.bmm(R_y, R_x))
+        normals_rot = torch.bmm(R, normals.unsqueeze(-1)).squeeze(-1)
+        return normals_rot
 
     def reset(self):
         self.current_step = 0
-        # Randomly sample a sun (light source) position.
-        # Ensure the sun's height (y-coordinate) is positive.
+        # Randomly sample a sun (light source) position (with positive y).
         self.sun_position = torch.empty(3, device=self.device).uniform_(10, 80).requires_grad_(True)
-        # Randomly sample reflector positions.
-        # We ensure that the x-coordinate (index 0) is always positive.
-        self.heliostat_positions = torch.empty((self.num_heliostats, 3), device=self.device).uniform_(10, 50)
-        self.heliostat_positions[:, 1] *= 0
+        # Randomly sample reflector positions (x positive; y is set to 0).
+        self.heliostat_positions = torch.empty((self.num_heliostats, 3), device=self.device).uniform_(10, 100)
+        self.heliostat_positions[:, 1] *= 0  # set y=0
 
         # Randomly sample target points around the target area center.
         target_center = self.target_area.center  # [0, height, 0]
@@ -70,6 +113,13 @@ class DifferentiableHeliostatEnv(gym.Env):
         # Global target points are in the form [0, m1, m2] (x=0).
         M2 = torch.stack([torch.zeros_like(M2_y), M2_y, M2_z], dim=1)
         
+        # Sample error angles if errors are enabled.
+        if self.add_errors:
+            # Sample error angles (in radians) for each heliostat's normal.
+            self.error_angles = torch.empty((self.num_heliostats, 3), device=self.device).uniform_(-self.error_magnitude, self.error_magnitude)
+        else:
+            self.error_angles = None
+
         # Compute normals using target points as M.
         self.current_normals = calculate_normals(self.sun_position, M2, self.heliostat_positions, device=self.device)
         # Compute reflection directions.
@@ -77,32 +127,34 @@ class DifferentiableHeliostatEnv(gym.Env):
                                                 device=self.device, return_numpy=False)
         # Calculate target coordinates from these reflections.
         self.current_targets = calculate_target_coordinates(self.heliostat_positions, self.current_reflections)
-        # Render heatmap using the target area's global_to_gaussian_blobs method.
+        # Render heatmap using target_area.global_to_gaussian_blobs.
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
-        # Build observation: flatten the heatmap, normals, heliostat positions, and sun position, then concatenate.
+        
+        # Build observation.
+        # If errors are enabled, rotate the current normals by the error angles for the observation.
+        if self.add_errors:
+            obs_normals = self._apply_error(self.current_normals, self.error_angles)
+        else:
+            obs_normals = self.current_normals
         obs = torch.cat([self.current_heatmap.flatten(), 
-                         self.current_normals.flatten(),
+                         obs_normals.flatten(),
                          self.heliostat_positions.flatten(),
                          self.sun_position.flatten()])
         return obs
 
     def step(self, action):
         self.current_step += 1
-        # Ensure action is a tensor.
         if not torch.is_tensor(action):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
         action = action.view(self.num_heliostats, 2)
 
         if self.control_method == "m_pos":
-            # Actions represent angular changes (in radians) for each heliostat.
-            # For each heliostat, apply two rotations: about the Y-axis and Z-axis.
             theta_y = action[:, 0]
             theta_z = action[:, 1]
             cos_y = torch.cos(theta_y)
             sin_y = torch.sin(theta_y)
             cos_z = torch.cos(theta_z)
             sin_z = torch.sin(theta_z)
-            # Rotation matrices: shape (num_heliostats, 3, 3)
             R_y = torch.zeros((self.num_heliostats, 3, 3), device=self.device)
             R_y[:, 0, 0] = cos_y
             R_y[:, 0, 2] = sin_y
@@ -117,36 +169,33 @@ class DifferentiableHeliostatEnv(gym.Env):
             R_z[:, 1, 1] = cos_z
             R_z[:, 2, 2] = 1
 
-            # Update normals: new_normals = R_z * R_y * current_normals.
-            old_normals = self.current_normals.unsqueeze(-1)  # (N, 3, 1)
+            old_normals = self.current_normals.unsqueeze(-1)
             new_normals = torch.bmm(R_z, torch.bmm(R_y, old_normals)).squeeze(-1)
             self.current_normals = new_normals
-            # Update reflection directions and target coordinates.
             self.current_reflections = reflect_ray(self.sun_position, self.heliostat_positions, self.current_normals,
                                                     device=self.device, return_numpy=False)
             self.current_targets = calculate_target_coordinates(self.heliostat_positions, self.current_reflections)
         elif self.control_method == "aim_point":
-            # Actions represent shifts in the target coordinates (y and z).
             self.current_targets[:, 1:] = self.current_targets[:, 1:] + action
-            # Recompute normals using the helper function.
             self.current_normals = calculate_normals(self.sun_position, self.current_targets, self.heliostat_positions, device=self.device)
             self.current_reflections = reflect_ray(self.sun_position, self.heliostat_positions, self.current_normals,
                                                     device=self.device, return_numpy=False)
         else:
             raise ValueError("Unknown control method")
 
-        # Render updated heatmap.
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
-        # Compute reward.
         max_dist = min(self.target_area.height / 2.0, self.target_area.width / 2.0)
-        target_center_yz = self.target_area.center[1:].unsqueeze(0)  # (1,2)
-        target_positions_yz = self.current_targets[:, 1:]  # (N,2)
+        target_center_yz = self.target_area.center[1:].unsqueeze(0)
+        target_positions_yz = self.current_targets[:, 1:]
         distances = torch.norm(target_positions_yz - target_center_yz, dim=1)
         reward = torch.sum(max_dist - distances)
         reward = reward - 0.01 * F.l1_loss(action, torch.zeros_like(action))
-        # Build observation.
+        if self.add_errors:
+            obs_normals = self._apply_error(self.current_normals, self.error_angles)
+        else:
+            obs_normals = self.current_normals
         obs = torch.cat([self.current_heatmap.flatten(), 
-                         self.current_normals.flatten(),
+                         obs_normals.flatten(),
                          self.heliostat_positions.flatten(),
                          self.sun_position.flatten()])
         done = self.current_step >= self.max_steps
@@ -154,7 +203,6 @@ class DifferentiableHeliostatEnv(gym.Env):
         return obs, reward, done, False, info
 
     def render(self):
-        # Use the display function to show the 3D scene.
         if self.control_method == "aim_point":
             display(self.heliostat_positions, self.sun_position, M=self.current_targets, device=self.device,
                     target_center=self.target_area.center,

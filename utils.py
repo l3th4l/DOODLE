@@ -4,6 +4,42 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 
+
+def plot_model_graph(model, input_tensor, output_file="model_graph"):
+    """
+    Plots the computational graph of a PyTorch model.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The PyTorch model for which to plot the graph.
+    input_tensor : torch.Tensor
+        An example input tensor to perform a forward pass.
+    output_file : str, optional
+        The base filename for saving the output graph (without extension).
+
+    Returns
+    -------
+    None
+    """
+    from torchviz import make_dot
+    
+    # Perform a forward pass to get the output tensor.
+    output = model(input_tensor)
+    # Create a graph from the output using the model's parameters.
+    dot = make_dot(output, params=dict(model.named_parameters()))
+    # Render the graph as a PNG file.
+    dot.render(output_file, format="png", cleanup=True)
+    
+    # Optionally, display the graph using matplotlib.
+    img = plt.imread(f"{output_file}.png")
+    plt.figure(figsize=(12, 12))
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title("Computational Graph")
+    plt.show()
+
+
 def set_axes_equal(ax):
     """Make the 3D plot axes have equal scale."""
     x_limits = ax.get_xlim3d()

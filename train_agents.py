@@ -19,7 +19,7 @@ from env import DifferentiableHeliostatEnv
 # -------------------------
 SEED = 123
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_EPISODES = 200
+NUM_EPISODES = 500
 MAX_STEPS = 10
 LR = 0.000002
 GAMMA = 0.99
@@ -64,8 +64,9 @@ def train_pg_agent(env, policy_net, optimizer, num_episodes=200):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
         optimizer.step()
-        rewards.append(cumulative_reward.detach().cpu())
-        print(f"PG Agent - Episode {episode}: Reward = {cumulative_reward}")
+        cumulative_reward_scaled = cumulative_reward.detach().cpu()/(env.max_steps * env.num_heliostats)
+        rewards.append(cumulative_reward_scaled)
+        print(f"PG Agent - Episode {episode}: Reward = {cumulative_reward_scaled}")
     return rewards
 
 # -------------------------
@@ -155,8 +156,8 @@ class SACAgent(object):
         else:
             self.alpha = ALPHA
 
-        self.policy_opt = optim.Adam(self.policy.parameters(), lr=lr, weight_decay=0.1)
-        self.q_opt = optim.Adam(list(self.q1.parameters()) + list(self.q2.parameters()), lr=lr, weight_decay=0.1)
+        self.policy_opt = optim.Adam(self.policy.parameters(), lr=lr, weight_decay=0.05)
+        self.q_opt = optim.Adam(list(self.q1.parameters()) + list(self.q2.parameters()), lr=lr, weight_decay=0.05)
 
         # Create linear decay LR schedulers (linearly decay from 1.0 to 0.0 over num_episodes).
         self.policy_scheduler = optim.lr_scheduler.LambdaLR(self.policy_opt, lr_lambda=lambda ep: 1 - ep/num_episodes)
@@ -241,9 +242,10 @@ def train_sac_agent(env, sac_agent, num_episodes=200):
     rewards = []
     for episode in range(num_episodes):
         ep_reward = sac_agent.train_episode()
-        rewards.append(ep_reward)
+        ep_reward_scaled = ep_reward/(env.max_steps * env.num_heliostats)
+        rewards.append(ep_reward_scaled)
         sac_agent.step_schedulers(episode)
-        print(f"SAC Agent - Episode {episode}: Reward = {ep_reward}")
+        print(f"SAC Agent - Episode {episode}: Reward = {ep_reward_scaled}")
     return rewards
 
 
@@ -263,7 +265,7 @@ def main():
     env = GaussianBlobEnv(image_size=IMG_SIZE, num_blobs=NUM_BLOBS, sigma=SIGMA,
                           amplitude=AMPLITUDE, max_steps=MAX_STEPS, observation_type="true_positions", DEVICE=DEVICE)
     '''
-    env = DifferentiableHeliostatEnv(control_method='aim_point', num_heliostats=4, device=DEVICE)
+    env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=4, device=DEVICE, error_magnitude=0)
     env.reset()
     env.render()
 
@@ -273,7 +275,7 @@ def main():
 
     # Initialize PG Agent.
     pg_policy = PGPolicy(obs_dim, act_dim).to(env.device)
-    pg_optimizer = optim.AdamW(pg_policy.parameters(), lr=0.01, weight_decay=0.05)
+    pg_optimizer = optim.AdamW(pg_policy.parameters(), lr=0.001, weight_decay=0.05)
     print("Training PG Agent...")
     pg_rewards = train_pg_agent(env, pg_policy, pg_optimizer, num_episodes=NUM_EPISODES)
 
