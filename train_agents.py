@@ -242,7 +242,7 @@ def train_sac_agent(env, sac_agent, num_episodes=200):
     rewards = []
     for episode in range(num_episodes):
         ep_reward = sac_agent.train_episode()
-        ep_reward_scaled = ep_reward/(env.max_steps * env.num_heliostats)
+        ep_reward_scaled = ep_reward / (env.max_steps * env.num_heliostats)
         rewards.append(ep_reward_scaled)
         sac_agent.step_schedulers(episode)
         print(f"SAC Agent - Episode {episode}: Reward = {ep_reward_scaled}")
@@ -256,6 +256,8 @@ def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {DEVICE}")
 
+    TRAIN_SAC = False
+
     #torch.manual_seed(SEED)
     #np.random.seed(SEED)
     #random.seed(SEED)
@@ -265,7 +267,9 @@ def main():
     env = GaussianBlobEnv(image_size=IMG_SIZE, num_blobs=NUM_BLOBS, sigma=SIGMA,
                           amplitude=AMPLITUDE, max_steps=MAX_STEPS, observation_type="true_positions", DEVICE=DEVICE)
     '''
+    
     env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=4, device=DEVICE, error_magnitude=0)
+
     env.reset()
     env.render()
 
@@ -279,12 +283,14 @@ def main():
     print("Training PG Agent...")
     pg_rewards = train_pg_agent(env, pg_policy, pg_optimizer, num_episodes=NUM_EPISODES)
 
-    # Reset environment.
-    env.reset()
-    # Initialize SAC Agent.
-    sac_agent = SACAgent(env, lr=LR, gamma=GAMMA, tau=TAU)
-    print("Training SAC Agent...")
-    sac_rewards = train_sac_agent(env, sac_agent, num_episodes=NUM_EPISODES)
+
+    if TRAIN_SAC:
+        # Reset environment.
+        env.reset()
+        # Initialize SAC Agent.
+        sac_agent = SACAgent(env, lr=LR, gamma=GAMMA, tau=TAU)
+        print("Training SAC Agent...")
+        sac_rewards = train_sac_agent(env, sac_agent, num_episodes=NUM_EPISODES)
 
     def moving_average(data, window=10):
         return np.convolve(data, np.ones(window)/window, mode='valid')
@@ -296,22 +302,32 @@ def main():
         return np.array(stds)
 
     window = 20
+    
+    episodes_smoothed = np.arange(window - 1, NUM_EPISODES)
+    
     pg_avg = moving_average(pg_rewards, window)
     pg_std = running_std(pg_rewards, window)
-    sac_avg = moving_average(sac_rewards, window)
-    sac_std = running_std(sac_rewards, window)
-    episodes_smoothed = np.arange(window - 1, NUM_EPISODES)
+
+    if TRAIN_SAC:
+        sac_avg = moving_average(sac_rewards, window)
+        sac_std = running_std(sac_rewards, window)
 
     plt.figure(figsize=(10, 6))
     plt.plot(episodes_smoothed, pg_avg, label="APG Agent (smoothed)")
     plt.fill_between(episodes_smoothed, pg_avg - pg_std, pg_avg + pg_std, alpha=0.3)
 
-    plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
-    plt.fill_between(episodes_smoothed, sac_avg - sac_std, sac_avg + sac_std, alpha=0.3)
+    if TRAIN_SAC:
+        plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
+        plt.fill_between(episodes_smoothed, sac_avg - sac_std, sac_avg + sac_std, alpha=0.3)
+            
+        plt.title("Reward Comparison: APG vs SAC (Smoothed) [Linear Scale]")
+    else:
+            
+        plt.title("Reward: APG (Smoothed) [Linear Scale]")
 
     plt.xlabel("Episode")
-    plt.ylabel("Cumulative Reward")
-    plt.title("Reward Comparison: APG vs SAC (Smoothed) [Linear Scale]")
+    plt.ylabel("Average Reward per heliostat (meters)")
+    
     plt.legend()
     plt.show()
 
@@ -319,11 +335,16 @@ def main():
     plt.figure(figsize=(10, 6))
     plt.plot(episodes_smoothed, pg_avg , label="APG Agent (smoothed)")
 
-    plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
+    if TRAIN_SAC:
+        plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
+
+        plt.title("Reward Comparison: APG vs SAC (Smoothed) [Log Scale]")
+    else:
+            
+        plt.title("Reward: APG (Smoothed) [Log Scale]")
 
     plt.xlabel("Episode")
-    plt.ylabel("Cumulative Reward")
-    plt.title("Reward Comparison: APG vs SAC (Smoothed) [Log Scale]")
+    plt.ylabel("Average Reward (meters)")
     plt.legend()
     plt.yscale('log')
     plt.show()

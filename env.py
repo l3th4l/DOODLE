@@ -39,6 +39,8 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.max_steps = max_steps
         self.current_step = 0
 
+        self.frames = []
+
         # Define action space: for either control method, we use 2 dimensions per heliostat.
         act_dim = 2 * self.num_heliostats
         self.act_dim = act_dim
@@ -98,6 +100,9 @@ class DifferentiableHeliostatEnv(gym.Env):
         return normals_rot
 
     def reset(self):
+        #frames to store animation
+        self.frames = []
+
         self.current_step = 0
         # Randomly sample a sun (light source) position (with positive y).
         self.sun_position = torch.empty(3, device=self.device).uniform_(10, 80).requires_grad_(True)
@@ -129,13 +134,18 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_targets = calculate_target_coordinates(self.heliostat_positions, self.current_reflections)
         # Render heatmap using target_area.global_to_gaussian_blobs.
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
-        
-        # Build observation.
+
+
+        self.frames.append(self.current_heatmap)
+
+        # Build observation: flatten the heatmap, normals, heliostat positions, and sun position, then concatenate.
+
         # If errors are enabled, rotate the current normals by the error angles for the observation.
         if self.add_errors:
             obs_normals = self._apply_error(self.current_normals, self.error_angles)
         else:
             obs_normals = self.current_normals
+
         obs = torch.cat([self.current_heatmap.flatten(), 
                          obs_normals.flatten(),
                          self.heliostat_positions.flatten(),
@@ -184,6 +194,10 @@ class DifferentiableHeliostatEnv(gym.Env):
             raise ValueError("Unknown control method")
 
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
+
+        self.frames.append(self.current_heatmap)
+
+        # Compute reward.
         max_dist = min(self.target_area.height / 2.0, self.target_area.width / 2.0)
         target_center_yz = self.target_area.center[1:].unsqueeze(0)
         target_positions_yz = self.current_targets[:, 1:]
