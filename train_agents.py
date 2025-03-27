@@ -19,7 +19,7 @@ from env import DifferentiableHeliostatEnv
 # -------------------------
 SEED = 123
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_EPISODES = 200
+NUM_EPISODES = 1500
 MAX_STEPS = 10
 LR = 0.000002
 GAMMA = 0.99
@@ -281,6 +281,7 @@ def main():
     print("Training PG Agent...")
     pg_rewards = train_pg_agent(env, pg_policy, pg_optimizer, num_episodes=NUM_EPISODES)
 
+    env.render(mode="rgb_array")
 
     if TRAIN_SAC:
         # Reset environment.

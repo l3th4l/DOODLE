@@ -4,6 +4,8 @@ import numpy as np
 import torch.nn.functional as F
 from gymnasium import spaces
 from utils import reflect_ray, calculate_normals, display
+from matplotlib import pyplot as plt
+from matplotlib import animation
 # Assume that TargetArea and display are also imported from utils
 from target_area import TargetArea, calculate_target_coordinates
 
@@ -164,18 +166,40 @@ class DifferentiableHeliostatEnv(gym.Env):
         info = {}
         return obs, reward, done, False, info
 
-    def render(self):
+    def render(self, mode = "human", name_suffix = '_apg', interval = 200):
         # Use the display function to show the 3D scene.
-        if self.control_method == "aim_point":
-            display(self.heliostat_positions, self.sun_position, M=self.current_targets, device=self.device,
-                    target_center=self.target_area.center,
-                    target_width=self.target_area.width,
-                    target_height=self.target_area.height)
+        if mode == "human":
+            if self.control_method == "aim_point":
+                display(self.heliostat_positions, self.sun_position, M=self.current_targets, device=self.device,
+                        target_center=self.target_area.center,
+                        target_width=self.target_area.width,
+                        target_height=self.target_area.height)
+            else:
+                display(self.heliostat_positions, self.sun_position, n=self.current_normals, device=self.device,
+                        target_center=self.target_area.center,
+                        target_width=self.target_area.width,
+                        target_height=self.target_area.height)
+        elif mode == "rgb_array":
+            fig, ax = plt.subplots()
+            ims = []
+
+            for frame in self.frames:
+                frame_np = frame.detach().cpu().numpy()
+                im = ax.imshow(frame_np, cmap="viridis", animated=True)
+                ims.append([im])
+            ax.axis("off")
+            ani = animation.ArtistAnimation(fig, ims, interval=interval, blit=True, repeat_delay=1000)
+           
+            # Save as GIF and return path if needed.
+            gif_filename = f"anim_output_episode_{name_suffix}.gif"
+            ani.save(gif_filename, writer="pillow")
+            plt.close(fig)
+
+            return gif_filename
         else:
-            display(self.heliostat_positions, self.sun_position, n=self.current_normals, device=self.device,
-                    target_center=self.target_area.center,
-                    target_width=self.target_area.width,
-                    target_height=self.target_area.height)
+            raise NotImplementedError(f"Render mode {mode} not supported.")
+
+        
 
 
 def main():
