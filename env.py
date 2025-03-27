@@ -34,6 +34,8 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.max_steps = max_steps
         self.current_step = 0
 
+        self.frames = []
+
         # Define action space: for either control method, we use 2 dimensions per heliostat.
         act_dim = 2 * self.num_heliostats
         self.act_dim = act_dim
@@ -53,6 +55,9 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_heatmap = torch.zeros((40, 60), device=self.device)
 
     def reset(self):
+        #frames to store animation
+        self.frames = []
+
         self.current_step = 0
         # Randomly sample a sun (light source) position.
         # Ensure the sun's height (y-coordinate) is positive.
@@ -79,6 +84,9 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_targets = calculate_target_coordinates(self.heliostat_positions, self.current_reflections)
         # Render heatmap using the target area's global_to_gaussian_blobs method.
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
+
+        self.frames.append(self.current_heatmap)
+
         # Build observation: flatten the heatmap, normals, heliostat positions, and sun position, then concatenate.
         obs = torch.cat([self.current_heatmap.flatten(), 
                          self.current_normals.flatten(),
@@ -137,6 +145,9 @@ class DifferentiableHeliostatEnv(gym.Env):
 
         # Render updated heatmap.
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
+
+        self.frames.append(self.current_heatmap)
+
         # Compute reward.
         max_dist = min(self.target_area.height / 2.0, self.target_area.width / 2.0)
         target_center_yz = self.target_area.center[1:].unsqueeze(0)  # (1,2)
