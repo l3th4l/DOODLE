@@ -20,11 +20,14 @@ class DifferentiableHeliostatEnv(gym.Env):
     The observation is a concatenation of the flattened rendered heatmap, the flattened reflector normals,
     the flattened heliostat positions, and the flattened sun position.
     """
-    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu")):
+    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu"), error_magnitude = 0):
         super().__init__()
         self.control_method = control_method
         self.device = device
         self.num_heliostats = num_heliostats
+
+        self.error_magnitude = error_magnitude
+        self.error_angles = None
 
         # Placeholder for heliostat positions (will be set in reset)
         self.heliostat_positions = torch.zeros((self.num_heliostats, 3), device=self.device)
@@ -57,6 +60,15 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_heatmap = torch.zeros((40, 60), device=self.device)
 
     def reset(self):
+        
+        error_magnitude = self.error_magnitude
+        
+        # Sample error angles if errors are enabled.
+        if error_magnitude > 0:
+            self.error_angles = torch.empty((self.num_heliostats, 3), device=self.device).uniform_(-self.error_magnitude, self.error_magnitude)
+        else:
+            self.error_angles = None
+
         #frames to store animation
         self.frames = []
 
@@ -71,7 +83,7 @@ class DifferentiableHeliostatEnv(gym.Env):
 
         # Randomly sample target points around the target area center.
         target_center = self.target_area.center  # [0, height, 0]
-        spread = 4.0  # meters
+        spread = min(self.target_area.height / 2.0, self.target_area.width / 2.0) # meters
         M2_y = target_center[1] + torch.empty(self.num_heliostats, device=self.device).uniform_(-spread, spread)
         M2_z = torch.empty(self.num_heliostats, device=self.device).uniform_(-spread, spread)
         # Global target points are in the form [0, m1, m2] (x=0).
@@ -90,13 +102,22 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.frames.append(self.current_heatmap)
 
         # Build observation: flatten the heatmap, normals, heliostat positions, and sun position, then concatenate.
+
+        if error_magnitude > 0:
+            obs_normals = self._apply_error(self.current_normals, self.error_angles).flatten()
+        else:
+            obs_normals = self.current_normals.flatten()
+        
         obs = torch.cat([self.current_heatmap.flatten(), 
-                         self.current_normals.flatten(),
+                         obs_normals,
                          self.heliostat_positions.flatten(),
                          self.sun_position.flatten()])
         return obs
 
     def step(self, action):
+
+        error_magnitude = self.error_magnitude
+
         self.current_step += 1
         # Ensure action is a tensor.
         if not torch.is_tensor(action):
@@ -151,18 +172,25 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.frames.append(self.current_heatmap)
 
         # Compute reward.
-        max_dist = min(self.target_area.height / 2.0, self.target_area.width / 2.0)
+        max_dist = min(self.target_area.height / 2.0, self.target_area.width / 2.0)**2
+        #max_dist = max_dist.to(device=)
         target_center_yz = self.target_area.center[1:].unsqueeze(0)  # (1,2)
         target_positions_yz = self.current_targets[:, 1:]  # (N,2)
         distances = torch.norm(target_positions_yz - target_center_yz, dim=1)
-        reward = torch.sum(max_dist - distances)
-        reward = reward - 0.01 * F.l1_loss(action, torch.zeros_like(action))
+        reward = torch.sum(max_dist - torch.square(distances))
+        done = reward < 0.0
+        reward = reward - 0.001 * F.l1_loss(action, torch.zeros_like(action))
         # Build observation.
+        if error_magnitude > 0:
+            obs_normals = self._apply_error(self.current_normals, self.error_angles).flatten()
+        else:
+            obs_normals = self.current_normals.flatten()
+        
         obs = torch.cat([self.current_heatmap.flatten(), 
-                         self.current_normals.flatten(),
+                         obs_normals,
                          self.heliostat_positions.flatten(),
                          self.sun_position.flatten()])
-        done = self.current_step >= self.max_steps
+        done = (self.current_step >= self.max_steps) or done
         info = {}
         return obs, reward, done, False, info
 
@@ -198,6 +226,43 @@ class DifferentiableHeliostatEnv(gym.Env):
             return gif_filename
         else:
             raise NotImplementedError(f"Render mode {mode} not supported.")
+    def _apply_error(self, normals, error_angles):
+        """
+        Rotate each normal by the corresponding error_angles (Euler angles in radians).
+        normals: (N, 3) and error_angles: (N, 3)
+        Returns rotated normals of shape (N, 3).
+        """
+        N = normals.shape[0]
+        cos_x = torch.cos(error_angles[:, 0])
+        sin_x = torch.sin(error_angles[:, 0])
+        R_x = torch.zeros((N, 3, 3), device=self.device)
+        R_x[:, 0, 0] = 1
+        R_x[:, 1, 1] = cos_x
+        R_x[:, 1, 2] = -sin_x
+        R_x[:, 2, 1] = sin_x
+        R_x[:, 2, 2] = cos_x
+
+        cos_y = torch.cos(error_angles[:, 1])
+        sin_y = torch.sin(error_angles[:, 1])
+        R_y = torch.zeros((N, 3, 3), device=self.device)
+        R_y[:, 0, 0] = cos_y
+        R_y[:, 0, 2] = sin_y
+        R_y[:, 1, 1] = 1
+        R_y[:, 2, 0] = -sin_y
+        R_y[:, 2, 2] = cos_y
+
+        cos_z = torch.cos(error_angles[:, 2])
+        sin_z = torch.sin(error_angles[:, 2])
+        R_z = torch.zeros((N, 3, 3), device=self.device)
+        R_z[:, 0, 0] = cos_z
+        R_z[:, 0, 1] = -sin_z
+        R_z[:, 1, 0] = sin_z
+        R_z[:, 1, 1] = cos_z
+        R_z[:, 2, 2] = 1
+
+        R = torch.bmm(R_z, torch.bmm(R_y, R_x))
+        normals_rot = torch.bmm(R, normals.unsqueeze(-1)).squeeze(-1)
+        return normals_rot
 
         
 

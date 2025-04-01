@@ -267,7 +267,7 @@ def main():
     env = GaussianBlobEnv(image_size=IMG_SIZE, num_blobs=NUM_BLOBS, sigma=SIGMA,
                           amplitude=AMPLITUDE, max_steps=MAX_STEPS, observation_type="true_positions", DEVICE=DEVICE)
     '''
-    env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=4, device=DEVICE)
+    env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=50, device=DEVICE, error_magnitude=1.145916)
     env.reset()
     env.render()
 
@@ -277,7 +277,7 @@ def main():
 
     # Initialize PG Agent.
     pg_policy = PGPolicy(obs_dim, act_dim).to(env.device)
-    pg_optimizer = optim.AdamW(pg_policy.parameters(), lr=0.01, weight_decay=0.05)
+    pg_optimizer = optim.AdamW(pg_policy.parameters(), lr=0.001, weight_decay=0.05)
     print("Training PG Agent...")
     pg_rewards = train_pg_agent(env, pg_policy, pg_optimizer, num_episodes=NUM_EPISODES)
 
