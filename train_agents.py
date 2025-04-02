@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 from env import DifferentiableHeliostatEnv 
+
 # -------------------------
 # Global Hyperparameters
 # -------------------------
@@ -25,24 +26,76 @@ LR = 0.000002
 GAMMA = 0.99
 TAU = 0.005
 
+# -------------------------
+# Simple Policy Gradient (PG) Agent - MLP Version
+# -------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(ResidualBlock, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.activation = nn.ReLU()
+        # If dimensions do not match, use a linear shortcut.
+        if in_features != out_features:
+            self.shortcut = nn.Linear(in_features, out_features)
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.linear(x)
+        out = self.activation(out)
+        return out + residual
+
+class PGPolicy(nn.Module):
+    def __init__(self, obs_dim, action_dim, hidden_sizes=[256, 128], use_residual=False):
+        """
+        obs_dim: dimensionality of the observation
+        action_dim: dimensionality of the action
+        hidden_sizes: list of hidden layer sizes (in order)
+        use_residual: if True, use residual blocks; otherwise, use simple Linear+ReLU layers.
+        """
+        super(PGPolicy, self).__init__()
+        layers = []
+        input_size = obs_dim
+        for hidden in hidden_sizes:
+            if use_residual:
+                layers.append(ResidualBlock(input_size, hidden))
+            else:
+                layers.append(nn.Linear(input_size, hidden))
+                layers.append(nn.ReLU())
+            input_size = hidden
+        self.feature_extractor = nn.Sequential(*layers)
+        self.out = nn.Linear(input_size, action_dim)
+    
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        return self.out(x)
 
 # -------------------------
-# Simple Policy Gradient (PG) Agent
+# Transformer-based Policy (Alternative Option)
 # -------------------------
-class PGPolicy(nn.Module):
-    def __init__(self, obs_dim, action_dim):
-        super(PGPolicy, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, 512),
-            nn.GELU(),
-            nn.Linear(512, 256),
-            nn.GELU(),
-            nn.Linear(256, 128),
-            nn.GELU(),
-            nn.Linear(128, action_dim)
-        )
+class TransformerPolicy(nn.Module):
+    def __init__(self, obs_dim, action_dim, num_layers=2, nhead=4, dim_feedforward=128):
+        super(TransformerPolicy, self).__init__()
+        # Project the flat observation into a d_model-dimensional embedding.
+        self.embedding = nn.Linear(obs_dim, dim_feedforward)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=dim_feedforward, nhead=nhead)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # Map the transformer output to the action dimension.
+        self.out = nn.Linear(dim_feedforward, action_dim)
     def forward(self, x):
-        return self.net(x)
+        # x shape: (batch_size, obs_dim)
+        x = self.embedding(x)         # (batch_size, dim_feedforward)
+        # Treat each observation as a single-token sequence.
+        x = x.unsqueeze(0)            # (1, batch_size, dim_feedforward)
+        x = self.transformer_encoder(x)  # (1, batch_size, dim_feedforward)
+        x = x.squeeze(0)              # (batch_size, dim_feedforward)
+        out = self.out(x)             # (batch_size, action_dim)
+        return out
 
 def train_pg_agent(env, policy_net, optimizer, num_episodes=200):
     device = env.device
@@ -70,7 +123,7 @@ def train_pg_agent(env, policy_net, optimizer, num_episodes=200):
     return rewards
 
 # -------------------------
-# Simple SAC Agent
+# Simple SAC Agent (unchanged)
 # -------------------------
 class SimpleSACPolicy(nn.Module):
     def __init__(self, obs_dim, action_dim):
@@ -154,12 +207,12 @@ class SACAgent(object):
             self.alpha = self.log_alpha.exp()
             self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
         else:
-            self.alpha = ALPHA
+            self.alpha = 0.2
 
         self.policy_opt = optim.Adam(self.policy.parameters(), lr=lr, weight_decay=0.1)
         self.q_opt = optim.Adam(list(self.q1.parameters()) + list(self.q2.parameters()), lr=lr, weight_decay=0.1)
 
-        # Create linear decay LR schedulers (linearly decay from 1.0 to 0.0 over num_episodes).
+        # Create linear decay LR schedulers.
         self.policy_scheduler = optim.lr_scheduler.LambdaLR(self.policy_opt, lr_lambda=lambda ep: 1 - ep/num_episodes)
         self.q_scheduler = optim.lr_scheduler.LambdaLR(self.q_opt, lr_lambda=lambda ep: 1 - ep/num_episodes)
         if self.automatic_entropy_tuning:
@@ -179,7 +232,7 @@ class SACAgent(object):
         done = False
         while not done:
             state = obs.to(self.device).detach()
-            action = self.select_action(state).detach()  # Detach to prevent gradients through env.
+            action = self.select_action(state).detach()
             next_obs, reward, done, _, _ = self.env.step(action)
             episode_reward += reward.item() if isinstance(reward, torch.Tensor) else reward
             next_state = next_obs.to(self.device).detach()
@@ -209,7 +262,6 @@ class SACAgent(object):
             q_pi = torch.min(q1_pi, q2_pi)
             if self.automatic_entropy_tuning:
                 policy_loss = (self.alpha * log_prob - q_pi).mean()
-                # Update entropy coefficient.
                 alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
                 self.alpha_opt.zero_grad()
                 alpha_loss.backward()
@@ -224,7 +276,6 @@ class SACAgent(object):
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
             self.policy_opt.step()
 
-            # Polyak averaging for target networks.
             for target, net in zip([self.q_target1, self.q_target2], [self.q1, self.q2]):
                 for target_param, param in zip(target.parameters(), net.parameters()):
                     target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
@@ -248,7 +299,6 @@ def train_sac_agent(env, sac_agent, num_episodes=200):
         print(f"SAC Agent - Episode {episode}: Reward = {ep_reward_scaled}")
     return rewards
 
-
 # -------------------------
 # Main Training Loop and Comparison
 # -------------------------
@@ -257,36 +307,28 @@ def main():
     print(f"Using device: {DEVICE}")
 
     TRAIN_SAC = False
+    USE_TRANSFORMER = False  # Set to True to use TransformerPolicy instead of MLP PGPolicy
 
-    #torch.manual_seed(SEED)
-    #np.random.seed(SEED)
-    #random.seed(SEED)
-
-    # Create the environment.
-    '''
-    env = GaussianBlobEnv(image_size=IMG_SIZE, num_blobs=NUM_BLOBS, sigma=SIGMA,
-                          amplitude=AMPLITUDE, max_steps=MAX_STEPS, observation_type="true_positions", DEVICE=DEVICE)
-    '''
-    env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=50, device=DEVICE, error_magnitude=1.145916)
+    env = DifferentiableHeliostatEnv(control_method='m_pos', num_heliostats=5, device=DEVICE, error_magnitude=0)
     env.reset()
     env.render()
 
-    # Compute dimensions.
     obs_dim = env.obs_dim
     act_dim = env.act_dim
 
     # Initialize PG Agent.
-    pg_policy = PGPolicy(obs_dim, act_dim).to(env.device)
-    pg_optimizer = optim.AdamW(pg_policy.parameters(), lr=0.001, weight_decay=0.05)
+    if USE_TRANSFORMER:
+        policy = TransformerPolicy(obs_dim, act_dim).to(env.device)
+    else:
+        policy = PGPolicy(obs_dim, act_dim).to(env.device)
+    pg_optimizer = optim.AdamW(policy.parameters(), lr=0.01, weight_decay=0.01)
     print("Training PG Agent...")
-    pg_rewards = train_pg_agent(env, pg_policy, pg_optimizer, num_episodes=NUM_EPISODES)
+    pg_rewards = train_pg_agent(env, policy, pg_optimizer, num_episodes=NUM_EPISODES)
 
     env.render(mode="rgb_array")
 
     if TRAIN_SAC:
-        # Reset environment.
         env.reset()
-        # Initialize SAC Agent.
         sac_agent = SACAgent(env, lr=LR, gamma=GAMMA, tau=TAU)
         print("Training SAC Agent...")
         sac_rewards = train_sac_agent(env, sac_agent, num_episodes=NUM_EPISODES)
@@ -301,47 +343,33 @@ def main():
         return np.array(stds)
 
     window = 20
-    
     episodes_smoothed = np.arange(window - 1, NUM_EPISODES)
-    
     pg_avg = moving_average(pg_rewards, window)
     pg_std = running_std(pg_rewards, window)
-
-    if TRAIN_SAC:
-        sac_avg = moving_average(sac_rewards, window)
-        sac_std = running_std(sac_rewards, window)
 
     plt.figure(figsize=(10, 6))
     plt.plot(episodes_smoothed, pg_avg, label="APG Agent (smoothed)")
     plt.fill_between(episodes_smoothed, pg_avg - pg_std, pg_avg + pg_std, alpha=0.3)
-
     if TRAIN_SAC:
+        sac_avg = moving_average(sac_rewards, window)
+        sac_std = running_std(sac_rewards, window)
         plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
         plt.fill_between(episodes_smoothed, sac_avg - sac_std, sac_avg + sac_std, alpha=0.3)
-            
         plt.title("Reward Comparison: APG vs SAC (Smoothed) [Linear Scale]")
     else:
-            
         plt.title("Reward: APG (Smoothed) [Linear Scale]")
-
     plt.xlabel("Episode")
     plt.ylabel("Average Reward per heliostat (meters)")
-    
     plt.legend()
     plt.show()
 
-
     plt.figure(figsize=(10, 6))
-    plt.plot(episodes_smoothed, pg_avg , label="APG Agent (smoothed)")
-
+    plt.plot(episodes_smoothed, pg_avg, label="APG Agent (smoothed)")
     if TRAIN_SAC:
         plt.plot(episodes_smoothed, sac_avg, label="SAC Agent (smoothed)")
-
         plt.title("Reward Comparison: APG vs SAC (Smoothed) [Log Scale]")
     else:
-            
         plt.title("Reward: APG (Smoothed) [Log Scale]")
-
     plt.xlabel("Episode")
     plt.ylabel("Average Reward (meters)")
     plt.legend()
