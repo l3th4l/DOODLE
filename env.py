@@ -20,7 +20,7 @@ class DifferentiableHeliostatEnv(gym.Env):
     The observation is a concatenation of the flattened rendered heatmap, the flattened reflector normals,
     the flattened heliostat positions, and the flattened sun position.
     """
-    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu"), error_magnitude=0):
+    def __init__(self, control_method="aim_point", num_heliostats=3, max_steps=20, device=torch.device("cpu"), error_magnitude=0, state_type = 'flat'):
         super().__init__()
         self.control_method = control_method
         self.device = device
@@ -28,6 +28,9 @@ class DifferentiableHeliostatEnv(gym.Env):
 
         self.error_magnitude = error_magnitude
         self.error_angles = None
+
+        assert((state_type == 'flat') or (state_type == 'sep'))
+        self.state_type = state_type
 
         # Placeholder for heliostat positions (will be set in reset)
         self.heliostat_positions = torch.zeros((self.num_heliostats, 3), device=self.device)
@@ -59,6 +62,8 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_targets = torch.zeros((self.num_heliostats, 3), device=self.device)
         self.current_heatmap = torch.zeros((40, 60), device=self.device)
 
+        self.movement_coef = 10.0
+
     def _rotate_vector(self, v, axis, angle):
         """
         Rotate vector v around the given axis by angle (in radians) using Rodrigues' rotation formula.
@@ -70,6 +75,8 @@ class DifferentiableHeliostatEnv(gym.Env):
 
     def reset(self):
         error_magnitude = self.error_magnitude
+
+        self.movement_coef *= 0.8
         
         # Sample error angles if errors are enabled.
         if error_magnitude > 0:
@@ -83,7 +90,7 @@ class DifferentiableHeliostatEnv(gym.Env):
 
         # Randomly sample a sun (light source) position. Ensure the sun's height is positive.
         self.sun_position = torch.empty(3, device=self.device).uniform_(10, 80).requires_grad_(True)
-        # Sample a random rotation axis for the sun (will be used in each step).
+        # Sample a random rotation axis for the sun (fixed for the episode).
         rand_axis = torch.randn(3, device=self.device)
         self.sun_rotation_axis = rand_axis / torch.norm(rand_axis)
 
@@ -109,24 +116,43 @@ class DifferentiableHeliostatEnv(gym.Env):
         self.current_heatmap = self.target_area.global_to_gaussian_blobs(self.current_targets, image_size=(40, 60))
         self.frames.append(self.current_heatmap)
 
+        # Save the initial features as "previous" for later updates.
+        if self.control_method == "aim_point":
+            self.prev_features = self.current_targets.clone()
+        else:
+            self.prev_features = self.current_normals.clone()
+
         # Build observation.
         if error_magnitude > 0:
             obs_normals = self._apply_error(self.current_normals, self.error_angles).flatten()
         else:
             obs_normals = self.current_normals.flatten()
         
-        obs = torch.cat([self.current_heatmap.flatten(), 
-                         obs_normals,
-                         self.heliostat_positions.flatten(),
-                         self.sun_position.flatten()])
+        if self.state_type == 'flat':
+            obs = torch.cat([self.current_heatmap.flatten(), 
+                            obs_normals,
+                            self.heliostat_positions.flatten(),
+                            self.sun_position.flatten()])
+        elif self.state_type == 'sep':
+            obs = dict()
+            obs['heatmap'] = self.current_heatmap
+            obs['info_vec'] = torch.cat([obs_normals,
+                            self.heliostat_positions.flatten(),
+                            self.sun_position.flatten()])
         return obs
 
     def step(self, action):
         error_magnitude = self.error_magnitude
 
-        # Rotate the sun every step by 15/60 degrees (i.e. pi/720 radians) around the fixed rotation axis.
+        # Rotate the sun every step by 15/60 degrees (pi/720 radians) around the fixed rotation axis.
         angle = math.pi / 720.0
         self.sun_position = self._rotate_vector(self.sun_position, self.sun_rotation_axis, angle)
+
+        # Save current features before updating.
+        if self.control_method == "aim_point":
+            prev_features = self.current_targets.clone()
+        else:
+            prev_features = self.current_normals.clone()
 
         self.current_step += 1
         if not torch.is_tensor(action):
@@ -175,20 +201,36 @@ class DifferentiableHeliostatEnv(gym.Env):
         target_center_yz = self.target_area.center[1:].unsqueeze(0)
         target_positions_yz = self.current_targets[:, 1:]
         distances = torch.norm(target_positions_yz - target_center_yz, dim=1)
+
         reward = torch.sum(max_dist - torch.square(distances))
-        done = torch.any((max_dist - distances) < 0)
-        reward = reward - 0.0001 * F.l1_loss(action, torch.zeros_like(action))
+        # Instead of marking done immediately, update features where (max_dist - distances²) < 0.
+        mask = (max_dist - torch.square(distances)) < 0
+        if mask.any():
+            if self.control_method == "aim_point":
+                self.current_targets[mask] += (prev_features[mask] - self.current_targets[mask]).detach()
+            else:
+                self.current_normals[mask] += (prev_features[mask] - self.current_normals[mask]).detach()
+        reward = reward - 0.000005 * F.l1_loss(action, torch.zeros_like(action)) * (self.movement_coef >= 0.1)
         
         if error_magnitude > 0:
             obs_normals = self._apply_error(self.current_normals, self.error_angles).flatten()
         else:
             obs_normals = self.current_normals.flatten()
         
-        obs = torch.cat([self.current_heatmap.flatten(), 
-                         obs_normals,
-                         self.heliostat_positions.flatten(),
-                         self.sun_position.flatten()])
-        done = (self.current_step >= self.max_steps) or done
+        if self.state_type == 'flat':
+            obs = torch.cat([self.current_heatmap.flatten(), 
+                            obs_normals,
+                            self.heliostat_positions.flatten(),
+                            self.sun_position.flatten()])
+        elif self.state_type == 'sep':
+            obs = dict()
+            obs['heatmap'] = self.current_heatmap
+            obs['info_vec'] = torch.cat([obs_normals,
+                            self.heliostat_positions.flatten(),
+                            self.sun_position.flatten()])
+
+        done = (self.current_step >= self.max_steps)
+        done = done or (reward <= 0)
         info = {}
         return obs, reward, done, False, info
 
@@ -254,6 +296,7 @@ class DifferentiableHeliostatEnv(gym.Env):
         R = torch.bmm(R_z, torch.bmm(R_y, R_x))
         normals_rot = torch.bmm(R, normals.unsqueeze(-1)).squeeze(-1)
         return normals_rot
+
 
 def main():
     from matplotlib import pyplot as plt
