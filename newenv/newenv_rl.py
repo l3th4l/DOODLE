@@ -1,6 +1,14 @@
 import torch
 import matplotlib.pyplot as plt
 
+#TODO: 
+# 1. Currently, our errors are sampled from a box distribution, which is not very interpretable 
+# Ideally, we want to sample error angles (in mrads) along the axis of rotations of the heliostats at the beginning
+# and then rotate our normals by those error angles while calling the render function. Create a seperate function which 
+# takes in a [3,] dim normal and a [2,] dim error angles, and then rotates the normal along the E and U axis 
+
+# 2. Currently we only train a single error sample, while we want to re-sample our errors at certain frequencies.
+# So we need to create a reset function which then re-samples our errors  
 
 def reflect_vector(incident: torch.Tensor, normal: torch.Tensor) -> torch.Tensor:
     """Reflects an incident vector about a normal vector."""
@@ -132,6 +140,7 @@ class HelioField:
             heliostat_pos = self.heliostat_positions[i]
             normal = heliostat_normals[i]
 
+            #TODO : need to change this to rotation by error angles (mrads) on the axes 
             normal = normal + self.error_vectors[i]
             normal = normal / torch.norm(normal)
 

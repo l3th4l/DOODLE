@@ -1,4 +1,4 @@
-from newenv_rl import HelioField
+from newenv_rl_test import HelioField
 from matplotlib import pyplot as plt
 import torch
 import torch.nn.functional as F
@@ -8,6 +8,24 @@ import scipy
 
 torch.autograd.set_detect_anomaly(True)
 
+class CNNPolicyNetwork(torch.nn.Module):
+    def __init__(self, image_size, num_heliostats):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(8, 16, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+        self.fc = nn.Linear(16, num_heliostats * 3)  # Assuming 3D action per heliostat
+
+    def forward(self, x):
+        x = x.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions: [B, C, H, W]
+        x = self.conv(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc(x)
+        return x.view(-1, 3)  # [num_heliostats, 3]
 
 def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal, plane_width, plane_height):
     """
@@ -60,36 +78,10 @@ def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal, plan
     
     return torch.mean(distances)
 
-class CNNPolicyNetwork(torch.nn.Module):
-    def __init__(self, image_size, num_heliostats):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.Conv2d(8, 16, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
-        self.fc = nn.Linear(16, num_heliostats * 3)  # Assuming 3D action per heliostat
-
-    def forward(self, x):
-        x = x.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions: [B, C, H, W]
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc(x)
-        return x.view(-1, 3)  # [num_heliostats, 3]
-
-
 # Configuration
 sun_position = torch.tensor([5.0, 20.0, 15.0])
 
-heliostat_positions = torch.tensor([
-                                    [-10.0, 10.0, 0.0], 
-                                    [10.0, 10.0, 0.0], 
-                                    [-10.0, 20.0, 0.0], 
-                                    [10.0, 20.0, 0.0], 
-                                    [0.0, 5.0, 0.0]
-                                    ])
+#heliostat_positions = torch.tensor([[0.0, 10.0, 0.0],])
 
 heliostat_positions = torch.rand(size = [50, 3]) * 10
 heliostat_positions [:, -1] = heliostat_positions [:, -1] * 0
@@ -99,14 +91,16 @@ target_normal = torch.tensor([0.0, 1.0, 0.0])
 target_area = (15.0, 15.0)
 
 
+
 # Reference (noise-free) field
 reference_field = HelioField(
     heliostat_positions=heliostat_positions,
     target_position=target_position,
     target_area=target_area,
     target_normal=target_normal,
-    error_scale=0.0, 
-    initial_error=0.0,
+    sigma_scale=0.1, 
+    error_scale_mrad=0.0, 
+    initial_action_noise=0.0
 )
 
 # Noisy field with trainable error vectors
@@ -115,7 +109,9 @@ noisy_field = HelioField(
     target_position=target_position,
     target_area=target_area,
     target_normal=target_normal,
-    error_scale=0.2
+    sigma_scale=0.1, 
+    error_scale_mrad=150.0, 
+    initial_action_noise=0.0
 )
 
 
@@ -127,9 +123,6 @@ with torch.no_grad():
     distance_map_np = scipy.ndimage.distance_transform_edt(1 - reference_binary)
     distance_map = torch.tensor(distance_map_np, device=target_image.device, dtype=torch.float32)
 
-#TODO: Make a miss loss for when the reflections don't hit the reciever 
-# using the 
-
 #Initial image for plotting 
 noisy_field.init_actions(sun_position)
 init_image = noisy_field.render(sun_position, noisy_field.initial_action)
@@ -140,9 +133,9 @@ num_heliostats = heliostat_positions.shape[0]
 policy_net = CNNPolicyNetwork(image_size, num_heliostats).to(target_image.device)
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=1e-2)
 
-anti_spillage_factor = 100
+anti_spillage_factor = 1000
 # Optimization loop
-for step in range(500):
+for step in range(1000):
     optimizer.zero_grad()
 
     action = policy_net(old_image)  # Get action from current image
@@ -161,9 +154,7 @@ for step in range(500):
                                 plane_width=target_area[0], 
                                 plane_height=target_area[1]
                                 )
-
     loss = loss_dist + loss_bound * anti_spillage_factor
-    
     loss.backward()
     optimizer.step()
 
