@@ -81,6 +81,7 @@ def train_batched(batch_size=5, steps=500):
     N = 50
     heliostat_positions = torch.rand(N,3)*10
     heliostat_positions[:,2]=0.0
+    heliostat_positions[:,0]= heliostat_positions[:,0] - 5
 
     target_position = torch.tensor([0.0,-5.0,0.0])
     target_normal   = torch.tensor([0.0, 1.0, 0.0])
@@ -182,4 +183,4 @@ def train_batched(batch_size=5, steps=500):
 if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
-    train_batched(batch_size=3, steps=300)
+    train_batched(batch_size=3, steps=500)
