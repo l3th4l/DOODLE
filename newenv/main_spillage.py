@@ -7,7 +7,14 @@ import scipy
 
 torch.autograd.set_detect_anomaly(True)
 
+device_str = 'cuda:1'
+device = torch.device(device_str if torch.cuda.is_available() or device_str == 'cpu' else 'cpu')
+torch.set_default_device(device)
 
+
+#TODO: Before calculateing the loss, normalize by the reference image's max 
+# also have an image MSE 
+# **have an normal alignment loss (for evaluation)   
 def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal,
                   plane_width, plane_height):
     dot_products = torch.einsum('ij,j->i', vectors, plane_normal)
