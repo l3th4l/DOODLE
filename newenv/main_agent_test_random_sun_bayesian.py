@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import math
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,20 +9,19 @@ from scipy.ndimage import distance_transform_edt
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+import optuna
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-
 from newenv_rl_test import HelioField
 
 torch.autograd.set_detect_anomaly(True)
 
-#NEXT GOAL :  get to converge < 1000 eps
-#Perform grid search / Bayesian Optimization on : LR, Scheduler options (Try exponential, Reduceonplateau, ***Cyclic)
-#cyclic : tyr with exponent with decay factor of 1.something, and find the max lr before we start diverging, now this is out max cyclic_lr 
-
+# NEXT GOAL: get to converge < 1000 eps
+# Perform Bayesian Optimization on: lr only
 
 class CNNPolicyNetwork(nn.Module):
-    def __init__(self, image_size, num_heliostats):
+    def __init__(self, image_size, num_heliostats, sun_hidden_dim=32, combined_hidden_dim=256):
         super().__init__()
+        # CNN for image feature extraction
         self.conv = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=5, padding=2),
             nn.ReLU(),
@@ -31,19 +31,39 @@ class CNNPolicyNetwork(nn.Module):
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
         )
-        self.fc = nn.Linear(128, num_heliostats * 3)
+        # MLP for sun-position input
+        self.sun_mlp = nn.Sequential(
+            nn.Linear(3, sun_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(sun_hidden_dim, sun_hidden_dim),
+            nn.ReLU()
+        )
+        # MLP to combine image and sun features
+        self.combined_mlp = nn.Sequential(
+            nn.Linear(128 + sun_hidden_dim, combined_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(combined_hidden_dim, num_heliostats * 3)
+        )
 
-    def forward(self, x):
+    def forward(self, x, sun_pos):
+        # x: (B, H, W), sun_pos: (B, 3)
         B, H, W = x.shape
+        # Image path
         x = x.view(B, 1, H, W)
         x = F.normalize(x, p=2, dim=1)
-        x = self.conv(x)
-        x = x.view(B, -1)
-        x = F.normalize(x, p=2, dim=1)
-        x = self.fc(x)
-        x = F.normalize(x, p=2, dim=1)
-        return x.view(B, -1, 3)
- 
+        img_feat = self.conv(x).view(B, -1)
+        img_feat = F.normalize(img_feat, p=2, dim=1)
+        # Sun-position path
+        sun_norm = sun_pos / (sun_pos.norm(dim=1, keepdim=True) + 1e-6)
+        sun_feat = self.sun_mlp(sun_norm)
+        # Combine
+        combined = torch.cat([img_feat, sun_feat], dim=1)
+        out = self.combined_mlp(combined)
+        # Reshape and normalize each vector
+        out = out.view(B, -1, 3)
+        out = out / (out.norm(dim=2, keepdim=True) + 1e-6)
+        return out
+
 
 def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal,
                   plane_width, plane_height):
@@ -68,20 +88,19 @@ def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal,
     dist = dist * (~inside).float()
     return dist.mean()
 
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-def train_batched(batch_size=5, 
-                  steps=500, 
-                  device_str='cpu', 
-                  save_name="run", 
-                  lr = 1e-2, 
-                  cutoff = 500):
+def train_batched(batch_size=5, steps=500, device_str='cpu', save_name="run", lr=1e-2, cutoff= 500, distance_factor=100.0):
     device = torch.device(device_str if torch.cuda.is_available() or device_str == 'cpu' else 'cpu')
-    print(f"\n=== Training on {device} ===")
+    print(f"\n=== Training on {device} | lr={lr:.3e} | distance_factor={distance_factor:.3e}===")
 
     writer = SummaryWriter(log_dir=f"runs_newenv/{save_name}")
 
-    sun_positions = torch.tensor([[0.0, 1000.0, 1000.0]] * batch_size, device=device)
+    # Sample random sun positions on a sphere of radius sqrt(1000^2 + 1000^2)
+    radius = math.sqrt(1000**2 + 1000**2)
+    sun_directions = torch.randn(batch_size, 3, device=device)
+    sun_directions = sun_directions / sun_directions.norm(dim=1, keepdim=True)
+    sun_positions = sun_directions * radius
+
     N = 50
     heliostat_positions = torch.rand(N, 3, device=device) * 10
     heliostat_positions[:, 2] = 0.0
@@ -118,19 +137,19 @@ def train_batched(batch_size=5,
 
     policy_net = CNNPolicyNetwork(resolution, N).to(device)
     optimizer = torch.optim.Adam(policy_net.parameters(), lr=lr)
-
-    # Add ReduceLROnPlateau scheduler
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=40, factor=0.95, verbose=True, threshold=1e-6, threshold_mode='abs')
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=50,
+                                  factor=0.95, verbose=True,
+                                  threshold=1e-6, threshold_mode='abs')
 
     anti_spillage_factor = 1000.0
-    mse_factor = 0.1
+    distance_factor = distance_factor
     final_loss = None
 
     for step in range(steps):
         optimizer.zero_grad()
-        action = policy_net(old_images)
+        # pass sun_positions into the policy
+        action = policy_net(old_images, sun_positions)
         images = noisy_field.render(sun_positions, action.view(batch_size, -1)).to(device)
-        #images_max = images.amax(dim=(1, 2), keepdim=True).detach()
         loss_dist = (images * distance_maps).sum(dim=(1, 2)).mean()
         loss_bound = sum(
             boundary_loss(
@@ -142,108 +161,83 @@ def train_batched(batch_size=5,
                 plane_height=target_area[1]
             ) for i in range(batch_size)
         ) / batch_size
- 
-        predicted_images_normed = torch.div(images, target_images_max)
-        target_images_normed = torch.div(target_images, target_images_max).detach()
-        #mask_epsilon = 1e-5
-        #mask = 1 #torch.mul(torch.div(images, images_max), old_images_normed).detach() > mask_epsilon
-        #mse_loss = nn.functional.mse_loss(torch.mul(mask, predicted_images_normed), torch.mul(mask, old_images_normed))
-        mse_loss = nn.functional.mse_loss(predicted_images_normed, target_images_normed)
 
-        error = torch.abs(predicted_images_normed - target_images_normed)
-        weighted_error = error * distance_maps 
+        predicted = images / target_images_max
+        target_normed = target_images / target_images_max
+        mse_loss = F.mse_loss(predicted, target_normed)
+        weighted_error = (predicted - target_normed).abs() * distance_maps
 
-        #loss =  anti_spillage_factor * loss_bound + mse_loss * ((step+1)/steps) + weighted_error.mean() * ((steps - step)/steps)
-
-        # Assuming step starts from 0 and increments by 1 each iteration
-        decay_factor = max(0, (cutoff - step) / cutoff)
-
-        loss = (anti_spillage_factor * loss_bound
-                + mse_loss * (1-decay_factor)
-                + weighted_error.mean() * decay_factor)
-
-        #loss = anti_spillage * loss_bound + mse_factor * mse_loss + loss_dist
+        decay = max(0, (cutoff - step) / cutoff)
+        loss = anti_spillage_factor * loss_bound + mse_loss * (1 - decay) + weighted_error.mean() * decay * distance_factor
 
         loss.backward()
         optimizer.step()
+        scheduler.step(loss)
 
         final_loss = loss.item()
-        lr = optimizer.param_groups[0]['lr']
-
+        lr_cur = optimizer.param_groups[0]['lr']
         writer.add_scalar('Loss/total', final_loss, step)
         writer.add_scalar('Loss/dist', loss_dist.item(), step)
         writer.add_scalar('Loss/bound', loss_bound.item(), step)
-        writer.add_scalar('LearningRate', lr, step)
-
-        # Update the learning rate scheduler
-        scheduler.step(final_loss)
+        writer.add_scalar('LearningRate', lr_cur, step)
 
         if step % 50 == 0 or step == steps - 1:
-            print(f"Step {step:3d} | Loss: {final_loss:.6f}  "
-                  f"[dist {loss_dist.item():.6f}, bound {loss_bound.item():.6f}, mse {mse_loss.item():.6f}] | LR: {lr:.6e}")
+            print(f"Step {step:3d} | Loss {final_loss:.4f} | dist {loss_dist:.4f} | bound {loss_bound:.4f} | mse {mse_loss:.4f} | LR {lr_cur:.1e}")
 
     writer.add_scalar('Loss/final', final_loss, steps)
     writer.close()
 
     with torch.no_grad():
-        final_actions = policy_net(old_images)
+        # inference with sun_positions
+        final_actions = policy_net(old_images, sun_positions)
         final_images = noisy_field.render(sun_positions, final_actions.view(batch_size, -1)).to(device)
 
-    fig, axs = plt.subplots(1, 4, figsize=(16, 4))
-    extent = [-7.5, 7.5, -7.5, 7.5]
-    im_max = torch.max(target_images[1])
-
-    axs[0].imshow(old_images[1].cpu().numpy().T, cmap='hot', extent=extent, origin='lower', vmin=0, vmax=im_max)
-    axs[0].set_title("Initial Heatmap (sample 0)")
-    axs[1].imshow(target_images[1].cpu().numpy().T, cmap='hot', extent=extent, origin='lower', vmin=0, vmax=im_max)
-    axs[1].set_title("Reference Heatmap")
-    axs[2].imshow(final_images[1].cpu().numpy().T, cmap='hot', extent=extent, origin='lower', vmin=0, vmax=im_max)
-    axs[2].set_title("Optimized Heatmap")
-    diff = (final_images - target_images).abs()[1]
-    axs[3].imshow(diff.cpu().numpy().T, cmap='hot', extent=extent, origin='lower', vmin=0, vmax=im_max)
-    axs[3].set_title("Absolute Error")
-    for ax in axs:
-        ax.set_xlabel("East (m)")
-        ax.set_ylabel("Up (m)")
-    plt.tight_layout()
-
-    filename = f"results_{save_name}.png" if save_name else 'results.png'
-    plt.savefig(filename)
-    plt.show()
-
-    return mse_loss #final_loss
-
-from datetime import datetime
-
-
+    # Visualization omitted for brevity
+    return final_loss
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train batched heliostat policy")
-    parser.add_argument('--batch_size', type=int, default=5, help='Batch size')
-    parser.add_argument('--steps', type=int, default=600, help='Training steps')
-    parser.add_argument('--device', type=str, default='cuda:2', help='Device (cpu or cuda)')
-    parser.add_argument('--lr', type=float, default=126.66135, help='Learning rate')
+    parser = argparse.ArgumentParser(description="Train batched heliostat policy with Optuna hyperparameter search")
+    parser.add_argument('--batch_size', type=int, default=10)
+    parser.add_argument('--steps', type=int, default=3000)
+    parser.add_argument('--device', type=str, default='cuda:1')
+    parser.add_argument('--trials', type=int, default=20)
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == 'cpu' else 'cpu')
     torch.set_default_device(device)
-
     torch.manual_seed(42)
     np.random.seed(42)
 
-    # Get the current time in mm_dd_yy_h_m format
-    current_time = datetime.now().strftime("%m_%d_%y_%H_%M")
-    current_time
+    def objective(trial):
+        lr = trial.suggest_float('lr', 1e1, 5e2, log=True)
+        distance_factor = trial.suggest_float('distance_factor', 1e0, 1e3, log=True)
+        save_name = f"optuna_lr{lr:.3f}_{distance_factor:.3f}_{trial.number}"
+        print(f"\n--- Trial {trial.number} | lr={lr:.3f} ---")
+        return train_batched(
+            batch_size=args.batch_size,
+            steps=args.steps,
+            device_str=args.device,
+            save_name=save_name,
+            lr=lr, 
+            distance_factor=distance_factor
+        )
 
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=args.trials)
+
+    best = study.best_params
+    print(f"Best learning rate: lr={best['lr']:.3f}, Best distance factor: lr={best['distance_factor']:.3f}")
+
+    # Final run with best lr
     train_batched(
         batch_size=args.batch_size,
         steps=args.steps,
         device_str=args.device,
-        save_name=f"fixed_lr_run_{args.lr:.3f}_{current_time}",
-        lr=args.lr
+        save_name=f"final_lr{best['lr']:.3f}_{best['distance_factor']:.3f}_final",
+        lr=best['lr'], 
+        distance_factor=best['distance_factor']
     )
-
 
 if __name__ == "__main__":
     main()

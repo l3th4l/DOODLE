@@ -8,16 +8,14 @@ from scipy.ndimage import distance_transform_edt
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+import optuna
 
 from newenv_rl_test import HelioField
 
 torch.autograd.set_detect_anomaly(True)
 
-#NEXT GOAL :  get to converge < 1000 eps
-#Perform grid search / Bayesian Optimization on : LR, Scheduler options (Try exponential, Reduceonplateau, ***Cyclic)
-#cyclic : tyr with exponent with decay factor of 1.something, and find the max lr before we start diverging, now this is out max cyclic_lr 
-
+# NEXT GOAL: get to converge < 1000 eps
+# Perform grid search / Bayesian Optimization on: LR, Scheduler options...
 
 class CNNPolicyNetwork(nn.Module):
     def __init__(self, image_size, num_heliostats):
@@ -43,7 +41,7 @@ class CNNPolicyNetwork(nn.Module):
         x = self.fc(x)
         x = F.normalize(x, p=2, dim=1)
         return x.view(B, -1, 3)
- 
+
 
 def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal,
                   plane_width, plane_height):
@@ -68,16 +66,10 @@ def boundary_loss(vectors, heliostat_positions, plane_center, plane_normal,
     dist = dist * (~inside).float()
     return dist.mean()
 
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-def train_batched(batch_size=5, 
-                  steps=500, 
-                  device_str='cpu', 
-                  save_name="run", 
-                  lr = 1e-2, 
-                  cutoff = 500):
+def train_batched(batch_size=5, steps=500, device_str='cpu', save_name="run", lr=1e-2):
     device = torch.device(device_str if torch.cuda.is_available() or device_str == 'cpu' else 'cpu')
-    print(f"\n=== Training on {device} ===")
+    print(f"\n=== Training on {device} | lr={lr} ===")
 
     writer = SummaryWriter(log_dir=f"runs_newenv/{save_name}")
 
@@ -119,9 +111,6 @@ def train_batched(batch_size=5,
     policy_net = CNNPolicyNetwork(resolution, N).to(device)
     optimizer = torch.optim.Adam(policy_net.parameters(), lr=lr)
 
-    # Add ReduceLROnPlateau scheduler
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=40, factor=0.95, verbose=True, threshold=1e-6, threshold_mode='abs')
-
     anti_spillage_factor = 1000.0
     mse_factor = 0.1
     final_loss = None
@@ -130,7 +119,6 @@ def train_batched(batch_size=5,
         optimizer.zero_grad()
         action = policy_net(old_images)
         images = noisy_field.render(sun_positions, action.view(batch_size, -1)).to(device)
-        #images_max = images.amax(dim=(1, 2), keepdim=True).detach()
         loss_dist = (images * distance_maps).sum(dim=(1, 2)).mean()
         loss_bound = sum(
             boundary_loss(
@@ -145,42 +133,31 @@ def train_batched(batch_size=5,
  
         predicted_images_normed = torch.div(images, target_images_max)
         target_images_normed = torch.div(target_images, target_images_max).detach()
-        #mask_epsilon = 1e-5
-        #mask = 1 #torch.mul(torch.div(images, images_max), old_images_normed).detach() > mask_epsilon
-        #mse_loss = nn.functional.mse_loss(torch.mul(mask, predicted_images_normed), torch.mul(mask, old_images_normed))
         mse_loss = nn.functional.mse_loss(predicted_images_normed, target_images_normed)
 
         error = torch.abs(predicted_images_normed - target_images_normed)
         weighted_error = error * distance_maps 
 
-        #loss =  anti_spillage_factor * loss_bound + mse_loss * ((step+1)/steps) + weighted_error.mean() * ((steps - step)/steps)
-
-        # Assuming step starts from 0 and increments by 1 each iteration
-        decay_factor = max(0, (cutoff - step) / cutoff)
+        decay_factor = max(0, (steps - step) / steps)
 
         loss = (anti_spillage_factor * loss_bound
                 + mse_loss * (1-decay_factor)
                 + weighted_error.mean() * decay_factor)
 
-        #loss = anti_spillage * loss_bound + mse_factor * mse_loss + loss_dist
-
         loss.backward()
         optimizer.step()
 
         final_loss = loss.item()
-        lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]['lr']
 
         writer.add_scalar('Loss/total', final_loss, step)
         writer.add_scalar('Loss/dist', loss_dist.item(), step)
         writer.add_scalar('Loss/bound', loss_bound.item(), step)
-        writer.add_scalar('LearningRate', lr, step)
-
-        # Update the learning rate scheduler
-        scheduler.step(final_loss)
+        writer.add_scalar('LearningRate', current_lr, step)
 
         if step % 50 == 0 or step == steps - 1:
             print(f"Step {step:3d} | Loss: {final_loss:.6f}  "
-                  f"[dist {loss_dist.item():.6f}, bound {loss_bound.item():.6f}, mse {mse_loss.item():.6f}] | LR: {lr:.6e}")
+                  f"[dist {loss_dist.item():.6f}, bound {loss_bound.item():.6f}, mse {mse_loss.item():.6f}] | LR: {current_lr:.6e}")
 
     writer.add_scalar('Loss/final', final_loss, steps)
     writer.close()
@@ -211,19 +188,15 @@ def train_batched(batch_size=5,
     plt.savefig(filename)
     plt.show()
 
-    return mse_loss #final_loss
-
-from datetime import datetime
-
-
+    return final_loss
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train batched heliostat policy")
+    parser = argparse.ArgumentParser(description="Train batched heliostat policy with Optuna hyperparameter search")
     parser.add_argument('--batch_size', type=int, default=5, help='Batch size')
-    parser.add_argument('--steps', type=int, default=600, help='Training steps')
+    parser.add_argument('--steps', type=int, default=1000, help='Training steps')
     parser.add_argument('--device', type=str, default='cuda:2', help='Device (cpu or cuda)')
-    parser.add_argument('--lr', type=float, default=126.66135, help='Learning rate')
+    parser.add_argument('--trials', type=int, default=20, help='Number of Optuna trials')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == 'cpu' else 'cpu')
@@ -232,18 +205,39 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
 
-    # Get the current time in mm_dd_yy_h_m format
-    current_time = datetime.now().strftime("%m_%d_%y_%H_%M")
-    current_time
+    # Define Optuna objective
+    from datetime import datetime
+    def objective(trial):
+        lr = trial.suggest_float('lr', 1e2, 8e2, log=True)
+        current_time = datetime.now().strftime("%m_%d_%y_%H_%M")
+        save_name = f"optuna_lr_{lr:.5f}_{current_time}"
+        print(f"\n--- Trial {trial.number} | lr={lr:.5f} ---")
+        loss = train_batched(
+            batch_size=args.batch_size,
+            steps=args.steps,
+            device_str=args.device,
+            save_name=save_name,
+            lr=lr
+        )
+        print(f"Trial {trial.number} finished with loss={loss:.6f}\n")
+        return loss
 
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=args.trials)
+
+    best_lr = study.best_params['lr']
+    print(f"Best learning rate found: {best_lr:.6f} after {len(study.trials)} trials")
+
+    # Final training with best LR
+    final_time = datetime.now().strftime("%m_%d_%y_%H_%M")
+    print(f"\n=== Final training with best lr={best_lr:.6f} ===")
     train_batched(
         batch_size=args.batch_size,
         steps=args.steps,
         device_str=args.device,
-        save_name=f"fixed_lr_run_{args.lr:.3f}_{current_time}",
-        lr=args.lr
+        save_name=f"final_lr_{best_lr:.6f}_{final_time}",
+        lr=best_lr
     )
-
 
 if __name__ == "__main__":
     main()
