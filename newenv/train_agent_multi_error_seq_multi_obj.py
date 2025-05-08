@@ -179,7 +179,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
     # training
     for step in range(args.steps):
-        parts, _, _ = rollout(ref_field, noisy_field, policy,
+        parts, pred_imgs, _ = rollout(ref_field, noisy_field, policy,
                               args.k, args.T,
                               heliostat_pos, targ_pos, targ_norm,
                               targ_area, distance_maps, sun_pos, dev)
