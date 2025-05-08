@@ -197,7 +197,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
         opt.step()
-        sched.step(loss.item())
+        sched.step(parts['mse'].item())
 
         if step%100==0 or step==args.steps-1:
             print(f"[{step:4d}] loss {loss:.4f} | "
