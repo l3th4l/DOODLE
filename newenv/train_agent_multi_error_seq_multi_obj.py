@@ -125,7 +125,7 @@ def rollout(field_ref, field_noisy, policy, k, T,
     return {'mse': mse, 'dist': dist_l, 'bound': bound}, img, target_img
 
 # ---------------------------------------------------------------------------
-def train_and_eval(args):
+def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     # device
     dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
     torch.set_default_device(dev)
@@ -172,7 +172,7 @@ def train_and_eval(args):
 
     # decay params
     anti_spill = 1.5e4
-    dist_f     = 1e4
+    dist_f = args.dist_fact
     cutoff     = int(0.8 * args.steps)
 
     writer = SummaryWriter(f"runs_multi_error/{datetime.now():%m%d_%H%M%S}")
@@ -205,6 +205,19 @@ def train_and_eval(args):
         writer.add_scalar("loss/mse",   parts['mse'], step)
         writer.add_scalar("loss/dist",  parts['dist'], step)
         writer.add_scalar("loss/bound", parts['bound'], step)
+
+        if plot_heatmaps_in_tensorboard and (step % 100 == 0):
+            imgs = pred_imgs
+            mins  = imgs.view(imgs.size(0), -1).min(1)[0].view(-1,1,1)
+            maxs  = imgs.view(imgs.size(0), -1).max(1)[0].view(-1,1,1)
+            norm_imgs = (imgs - mins) / (maxs - mins + 1e-6)
+            # add_images expects (N, C, H, W); ensure a channel dim exists
+            writer.add_images(
+                tag="Predicted/normalized_heatmaps",
+                img_tensor=norm_imgs.unsqueeze(1),
+                global_step=step, 
+                dataformats='NCHW'
+                )
     writer.close()
 
     # ------------------------------------------------------------
@@ -239,6 +252,7 @@ if __name__=="__main__":
     p.add_argument("--T",          type=int, default=4)
     p.add_argument("--k",          type=int, default=4)
     p.add_argument("--lr",         type=float, default=2e-4)
+    p.add_argument("--dist_fact",  type=float, default=1e3)
     p.add_argument("--device",     type=str, default="cuda")
     args = p.parse_args()
     train_and_eval(args)
