@@ -165,7 +165,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard=True):
     # model + opt
     aux_dim = 3+N*3
     policy  = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim).to(dev)
-    opt     = SmoothedAdam(policy.parameters(), lr=args.lr)
+    opt     = SmoothedAdam(policy.parameters(), lr=args.lr, m=args.m, n_samples=args.N)
     sched   = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
     # decay params
@@ -263,5 +263,7 @@ if __name__=="__main__":
     p.add_argument("--k",          type=int, default=4)
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cuda")
+    p.add_argument("--N",          type=int, default=3)
+    p.add_argument("--m",          type=float, default=0.005)
     args = p.parse_args()
     train_and_eval(args)
