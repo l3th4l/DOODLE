@@ -163,14 +163,15 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
-    # decay params
+    # decay-schedule params
     anti_spill = 1.5e4
     dist_f     = 1e4
-    cutoff     = int(0.8 * args.steps)
+    warmup_steps = args.warmup_steps
+    active_training_steps = max(1, args.steps - warmup_steps)
+    cutoff = int(0.8 * active_training_steps)  # 80 % of post-warm-up steps
 
     writer = SummaryWriter(f"runs_multi_error/{datetime.now():%m%d_%H%M%S}")
 
-    # training
     for step in range(args.steps):
         opt.zero_grad()
         parts, pred_imgs, _ = rollout(ref_field, noisy_field, policy,
@@ -178,10 +179,22 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
                               heliostat_pos, targ_pos, targ_norm,
                               targ_area, distance_maps, sun_pos, dev)
 
-        decay = max(1e-5, (cutoff-step)/cutoff)
-        loss  = (parts['mse']*(1-decay+1e-5)
-                + dist_f*parts['dist']*decay
-                + anti_spill*parts['bound'])
+        # ------------------------------------------------------------
+        # Warm-up phase: rely solely on boundary loss to keep the flux
+        # inside the target while the policy “finds its feet”.
+        if step < warmup_steps:
+            # ------------------------------------------------------------
+            # Linear ramp-up: at step 0 the distance penalty is zero,
+            # at step warmup_steps-1 it equals the full dist_f weight.
+            ramp = step / max(1, warmup_steps)          # ∈ [0, 1)
+            loss = (anti_spill * parts['bound']
+                    + ramp * dist_f * parts['dist'])
+        else:
+            eff_step = step - warmup_steps
+            decay = max(1e-5, (cutoff - eff_step) / cutoff)
+            loss  = (parts['mse']*(1-decay+1e-5)
+                    + dist_f*parts['dist']*decay
+                    + anti_spill*parts['bound'])
 
         loss.backward()
 
@@ -248,5 +261,8 @@ if __name__=="__main__":
     p.add_argument("--k",          type=int, default=4)
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cuda")
+    p.add_argument("--warmup_steps", type=int, default=500,
+                   help="Number of initial steps that use only the boundary "
+                        "loss before switching to the full loss.")
     args = p.parse_args()
     train_and_eval(args)
