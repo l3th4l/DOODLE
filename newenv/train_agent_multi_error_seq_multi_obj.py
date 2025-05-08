@@ -13,6 +13,8 @@ from scipy.ndimage import distance_transform_edt
 from datetime import datetime
 import matplotlib.pyplot as plt
 
+from dom_adam_optimizer import ADom 
+
 from newenv_rl_test_multi_error import HelioField   # your multi-error env
 
 # ---------------------------------------------------------------------------
@@ -160,7 +162,12 @@ def train_and_eval(args):
     # model + opt
     aux_dim = 3+N*3
     policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim).to(dev)
-    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
+
+    opt   = ADom(                     # ← Dominant Adam
+        policy.parameters(),
+        lr=args.lr,
+        max_grad_norm=1.0             # same clipping threshold you used before
+    )
     sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
     # decay params
@@ -172,30 +179,29 @@ def train_and_eval(args):
 
     # training
     for step in range(args.steps):
-        opt.zero_grad()
         parts, _, _ = rollout(ref_field, noisy_field, policy,
                               args.k, args.T,
                               heliostat_pos, targ_pos, targ_norm,
                               targ_area, distance_maps, sun_pos, dev)
 
         decay = max(1e-5, (cutoff-step)/cutoff)
-        loss  = (parts['mse']*(1-decay+1e-5)
-                + dist_f*parts['dist']*decay
-                + anti_spill*parts['bound'])
+        losses  = [
+            parts['mse']*(1-decay+1e-5),
+            dist_f*parts['dist']*decay,
+            anti_spill*parts['bound']
+            ]
 
-        loss.backward()
+        chosen = opt.step(losses)                 # ← one call does all the work
 
-        # gradient clipping
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-
-        opt.step()
-        sched.step(loss.item())
+        total_loss = torch.stack(losses).sum()    # for LR sched & TensorBoard
+        sched.step(total_loss.item())
 
         if step%100==0 or step==args.steps-1:
-            print(f"[{step:4d}] loss {loss:.4f} | "
+            print(f"[{step:4d}] L{chosen} chosen | "
+                  f"loss {total_loss:.4f} | "
                   f"mse {parts['mse']:.2e} dist {parts['dist']:.2e} "
                   f"bound {parts['bound']:.2e}")
-        writer.add_scalar("loss/total", loss.item(), step)
+        writer.add_scalar("loss/total", total_loss.item(), step)
         writer.add_scalar("loss/mse",   parts['mse'], step)
         writer.add_scalar("loss/dist",  parts['dist'], step)
         writer.add_scalar("loss/bound", parts['bound'], step)
