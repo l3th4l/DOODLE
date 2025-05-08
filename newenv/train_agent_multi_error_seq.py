@@ -183,12 +183,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         # Warm-up phase: rely solely on boundary loss to keep the flux
         # inside the target while the policy “finds its feet”.
         if step < warmup_steps:
-            # ------------------------------------------------------------
-            # Linear ramp-up: at step 0 the distance penalty is zero,
-            # at step warmup_steps-1 it equals the full dist_f weight.
-            ramp = step / max(1, warmup_steps)          # ∈ [0, 1)
-            loss = (anti_spill * parts['bound']
-                    + ramp * dist_f * parts['dist'])
+            loss = anti_spill * parts['bound']
         else:
             eff_step = step - warmup_steps
             decay = max(1e-5, (cutoff - eff_step) / cutoff)
