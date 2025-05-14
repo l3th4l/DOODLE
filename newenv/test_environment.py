@@ -65,6 +65,9 @@ class HelioEnv(Env):
         )
         self.target_normal = self.target_normal / self.target_normal.norm().clamp_min(1e-9)
 
+        # resolution
+        self.resolution = resolution
+
         # Instantiate HelioField for reference and noisy
         self.reference_field = HelioField(
             heliostat_positions, target_position, target_area, target_normal,
