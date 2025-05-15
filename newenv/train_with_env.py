@@ -252,7 +252,6 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
                 # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
-                if step == warmup_steps:
                 eff_step = step - warmup_steps
                 decay = max(1e-5, (cutoff - eff_step) / cutoff)
                 loss  = (mse_f * parts['mse']*(1-decay+1e-5)
