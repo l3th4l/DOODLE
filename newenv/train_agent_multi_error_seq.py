@@ -43,7 +43,7 @@ class CNNEncoder(nn.Module):
 
 class PolicyNet(nn.Module):
     def __init__(self, img_channels, num_heliostats, aux_dim,
-                 enc_dim=128, lstm_hid=128):
+                 enc_dim=128, lstm_hid=128, use_lstm=True):
         super().__init__()
         self.encoder = CNNEncoder(img_channels, enc_dim)
         self.lstm    = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
