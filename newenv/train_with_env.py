@@ -193,8 +193,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             resolution=res,
             batch_size=25,
             device=args.device,
-            new_sun_pos_every_reset=False,
-            new_errors_every_reset=False,
+            new_sun_pos_every_reset=args.new_sun_pos_every_reset,
+            new_errors_every_reset=args.new_errors_every_reset,
         )
         train_envs_list.append(train_env)
 
