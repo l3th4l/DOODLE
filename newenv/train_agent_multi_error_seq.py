@@ -40,7 +40,7 @@ class CNNEncoder(nn.Module):
         return F.relu(self.proj(feat))
 
 #Legacy policy (only LSTM) 
-'''
+
 class PolicyNet(nn.Module):
     def __init__(self, img_channels, num_heliostats, aux_dim,
                  enc_dim=128, lstm_hid=128):
@@ -62,8 +62,8 @@ class PolicyNet(nn.Module):
         x = torch.cat([last, aux], dim=1)
         normals = self.head(x).view(B, self.num_h, 3)
         return F.normalize(normals, dim=2), hx
-'''
 
+'''
 class PolicyNet(nn.Module):
     def __init__(self,
                  img_channels: int,
@@ -140,7 +140,7 @@ class PolicyNet(nn.Module):
         normals = F.normalize(normals, dim=2)
 
         return normals, hx
-
+'''
 # ---------------------------------------------------------------------------
 def rollout(field_ref, field_noisy, policy, k, T,
             heliostat_pos, targ_pos, targ_norm, targ_area,
