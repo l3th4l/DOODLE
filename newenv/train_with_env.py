@@ -312,6 +312,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         writer.add_scalar("loss/mse",   parts['mse'], step)
         writer.add_scalar("loss/dist",  parts['dist'], step)
         writer.add_scalar("loss/bound", parts['bound'], step)
+        writer.add_scalar("hyperparams/lr", opt.param_groups[0]['lr'], step)
 
         if plot_heatmaps_in_tensorboard and (step % 100 == 0):
             imgs = pred_imgs
