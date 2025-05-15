@@ -39,6 +39,8 @@ class CNNEncoder(nn.Module):
         feat = self.cnn(x).flatten(1)
         return F.relu(self.proj(feat))
 
+#Legacy policy (only LSTM) 
+'''
 class PolicyNet(nn.Module):
     def __init__(self, img_channels, num_heliostats, aux_dim,
                  enc_dim=128, lstm_hid=128):
@@ -60,6 +62,84 @@ class PolicyNet(nn.Module):
         x = torch.cat([last, aux], dim=1)
         normals = self.head(x).view(B, self.num_h, 3)
         return F.normalize(normals, dim=2), hx
+'''
+
+class PolicyNet(nn.Module):
+    def __init__(self,
+                 img_channels: int,
+                 num_heliostats: int,
+                 aux_dim: int,
+                 enc_dim: int = 128,
+                 lstm_hid: int = 128,
+                 use_lstm: bool = True):
+        """
+        Args:
+            img_channels: number of image channels in input
+            num_heliostats: how many normals to predict
+            aux_dim: dimension of extra (non-image) features
+            enc_dim: output dimension of CNNEncoder per frame
+            lstm_hid: hidden size of the LSTM (only used if use_lstm=True)
+            use_lstm: whether to run an LSTM over the encoded frames;
+                      if False, simply use the encoding of the last frame
+        """
+        super().__init__()
+        self.num_h = num_heliostats
+        self.use_lstm = use_lstm
+
+        # shared CNN encoder
+        self.encoder = CNNEncoder(img_channels, enc_dim)
+
+        if self.use_lstm:
+            # recurrent path
+            self.rnn   = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
+            feat_dim   = lstm_hid
+        else:
+            # non‐recurrent path just uses the per‐frame encoding
+            feat_dim   = enc_dim
+
+        # final head takes [feat_dim + aux_dim] → hidden → num_heliostats*3
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim + aux_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_heliostats * 3)
+        )
+
+    def forward(self,
+                img_seq: torch.Tensor,
+                aux: torch.Tensor,
+                hx: tuple = None):
+        """
+        Args:
+            img_seq: (B, T, C, H, W) input image sequence
+            aux:     (B, aux_dim) auxiliary features
+            hx:      optional LSTM hidden state (ignored if use_lstm=False)
+        Returns:
+            normals: (B, num_heliostats, 3) unit‐length surface normals
+            hx:      new LSTM state if use_lstm=True, else None
+        """
+        B, T, C, H, W = img_seq.shape
+
+        # flatten frames into batch
+        x   = img_seq.view(B * T, C, H, W)
+        enc = self.encoder(x)            # (B*T, enc_dim)
+        enc = enc.view(B, T, -1)         # (B, T, enc_dim)
+
+        if self.use_lstm:
+            # run recurrent encoder
+            out, hx = self.rnn(enc, hx)
+            feat = out[:, -1, :]         # last time step
+        else:
+            # just pick the last‐frame encoding
+            feat = enc[:, -1, :]
+            hx   = None                  # no hidden state to carry forward
+
+        # concatenate aux features and predict
+        x       = torch.cat([feat, aux], dim=1)    # (B, feat_dim+aux_dim)
+        normals = self.head(x)                     # (B, num_h*3)
+        normals = normals.view(B, self.num_h, 3)
+        normals = F.normalize(normals, dim=2)
+
+        return normals, hx
 
 # ---------------------------------------------------------------------------
 def rollout(field_ref, field_noisy, policy, k, T,
@@ -159,18 +239,19 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
     # model + opt
     aux_dim = 3+N*3
-    policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim).to(dev)
+    policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, use_lstm=args.use_lstm).to(dev)
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
-    # decay params
+    # decay-schedule params
     anti_spill = 1.5e4
     dist_f     = 1e4
-    cutoff     = int(0.8 * args.steps)
+    warmup_steps = args.warmup_steps
+    active_training_steps = max(1, args.steps - warmup_steps)
+    cutoff = int(0.8 * active_training_steps)  # 80 % of post-warm-up steps
 
     writer = SummaryWriter(f"runs_multi_error/{datetime.now():%m%d_%H%M%S}")
 
-    # training
     for step in range(args.steps):
         opt.zero_grad()
         parts, pred_imgs, _ = rollout(ref_field, noisy_field, policy,
@@ -178,10 +259,17 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
                               heliostat_pos, targ_pos, targ_norm,
                               targ_area, distance_maps, sun_pos, dev)
 
-        decay = max(1e-5, (cutoff-step)/cutoff)
-        loss  = (parts['mse']*(1-decay+1e-5)
-                + dist_f*parts['dist']*decay
-                + anti_spill*parts['bound'])
+        # ------------------------------------------------------------
+        # Warm-up phase: rely solely on boundary loss to keep the flux
+        # inside the target while the policy “finds its feet”.
+        if step < warmup_steps:
+            loss = anti_spill * parts['bound']
+        else:
+            eff_step = step - warmup_steps
+            decay = max(1e-5, (cutoff - eff_step) / cutoff)
+            loss  = (parts['mse']*(1-decay+1e-5)
+                    + dist_f*parts['dist']*decay
+                    + anti_spill*parts['bound'])
 
         loss.backward()
 
@@ -189,7 +277,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
         opt.step()
-        sched.step(loss.item())
+        sched.step(parts['mse'].item())
 
         if step%100==0 or step==args.steps-1:
             print(f"[{step:4d}] loss {loss:.4f} | "
@@ -248,5 +336,9 @@ if __name__=="__main__":
     p.add_argument("--k",          type=int, default=4)
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cuda")
+    p.add_argument("--use_lstm",     type=bool, default=True)
+    p.add_argument("--warmup_steps", type=int, default=500,
+                   help="Number of initial steps that use only the boundary "
+                        "loss before switching to the full loss.")
     args = p.parse_args()
     train_and_eval(args)
