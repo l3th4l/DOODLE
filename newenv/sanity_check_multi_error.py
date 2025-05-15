@@ -202,6 +202,58 @@ def compare_fields_and_plot() -> None:
         fig_title="Duplicated‑sun (unique errors per instance)",
     )
 
+    # ----------------------------------------------------------------------------
+    # Duplicate sun shift test
+    # ----------------------------------------------------------------------------  
+    
+    vec_field.init_actions(sun_batch_dup + 10.0)
+    actions_dup = vec_field.initial_action.clone()
+    images_dup_new  = vec_field.render(sun_batch_dup, actions_dup)
+
+    max_pairwise = max(
+        (images_dup[i] - images_dup_new[i]).abs().max().item()
+        for i in range(dup_n - 1)
+    )
+    assert max_pairwise > 1e-6, "Shifted sun images identical — errors not resampled!"
+    print(
+        f"Shifted sun test passed — vectorised field produces unique irradiance maps (max Δ = {max_pairwise:.3e}).\n"
+    )
+
+    _plot_grid(
+        images=[(images_dup[i] - images_dup_new[i]).abs() for i in range(dup_n)],
+        titles=[f"Abs Diff {i}" for i in range(dup_n)],
+        target_dims=target_dims,
+        cols=4,
+        fig_title="Shifted Sun Differences",
+    )
+
+
+    # ----------------------------------------------------------------------------
+    # Reset test 
+    # ----------------------------------------------------------------------------
+
+    vec_field.reset_errors()
+    vec_field.init_actions(sun_batch_dup)
+    actions_dup = vec_field.initial_action.clone()
+    images_dup_new  = vec_field.render(sun_batch_dup, actions_dup)
+
+    max_pairwise = max(
+        (images_dup[i] - images_dup_new[i]).abs().max().item()
+        for i in range(dup_n - 1)
+    )
+    assert max_pairwise > 1e-6, "Reset images identical — errors not resampled!"
+    print(
+        f"Reset test passed — vectorised field produces unique irradiance maps (max Δ = {max_pairwise:.3e}).\n"
+    )
+
+    _plot_grid(
+        images=[(images_dup[i] - images_dup_new[i]).abs() for i in range(dup_n)],
+        titles=[f"Abs Diff {i}" for i in range(dup_n)],
+        target_dims=target_dims,
+        cols=4,
+        fig_title="Reset Differences",
+    )
+
 
 # ----------------------------------------------------------------------------
 # Helper plotting utilities
