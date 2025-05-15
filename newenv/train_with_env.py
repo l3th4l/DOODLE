@@ -224,7 +224,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
     elif args.scheduler == "cyclic":
         sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
-                         step_size_up=1000, mode='triangular')
+                         step_size_up=args.step_size_up, mode='triangular')
     elif args.scheduler == "exp":
         sched = ExponentialLR(opt, gamma=args.exp_decay)
 
