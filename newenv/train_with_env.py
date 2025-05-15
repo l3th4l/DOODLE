@@ -31,7 +31,31 @@ class CNNEncoder(nn.Module):
     def forward(self, x):
         feat = self.cnn(x).flatten(1)
         return F.relu(self.proj(feat))
+# ---------------------------------------------------------------------------
+# Use Legacy Policy for now 
+class PolicyNet(nn.Module):
+    def __init__(self, img_channels, num_heliostats, aux_dim,
+                 enc_dim=128, lstm_hid=128, use_lstm=True):
+        super().__init__()
+        self.encoder = CNNEncoder(img_channels, enc_dim)
+        self.lstm    = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
+        self.head    = nn.Sequential(
+            nn.Linear(lstm_hid+aux_dim, 256), nn.ReLU(),
+            nn.Linear(256, num_heliostats*3)
+        )
+        self.num_h = num_heliostats
 
+    def forward(self, img_seq, aux, hx=None):
+        B,T,C,H,W = img_seq.shape
+        x = img_seq.view(B*T, C, H, W)
+        enc = self.encoder(x).view(B, T, -1)
+        out, hx = self.lstm(enc, hx)
+        last = out[:, -1]
+        x = torch.cat([last, aux], dim=1)
+        normals = self.head(x).view(B, self.num_h, 3)
+        return F.normalize(normals, dim=2), hx
+
+'''
 class PolicyNet(nn.Module):
     def __init__(self,
                  img_channels: int,
@@ -108,7 +132,7 @@ class PolicyNet(nn.Module):
         normals = F.normalize(normals, dim=2)
 
         return normals, hx
-
+'''
 # ---------------------------------------------------------------------------
 def rollout(env, policy, k, T, device, use_max=False):
     """Run T steps, return dict of {mse, dist, bound} on final frame."""
@@ -184,7 +208,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         batch_size=9,
         device=args.device,
         new_sun_pos_every_reset=False,
-        new_errors_every_reset=True,
+        new_errors_every_reset=False,
     )
 
     # model + opt
