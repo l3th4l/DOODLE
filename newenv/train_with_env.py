@@ -224,7 +224,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     # decay-schedule params
     anti_spill = args.anti_spill
     dist_f     = args.dist_f
-    mse_f     = 
+    mse_f     = args.mse_f
     # warmup-schedule params
     warmup_steps = args.warmup_steps
     active_training_steps = max(1, args.steps - warmup_steps)
