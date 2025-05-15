@@ -190,8 +190,7 @@ class HelioEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
 
-        with torch.no_grad():
-            img = self.noisy_field.render(self.sun_pos, action)
+        img = self.noisy_field.render(self.sun_pos, action)
 
         # Compute auxiliary input
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
@@ -199,7 +198,7 @@ class HelioEnv(gym.Env):
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
-        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1).detach())
+        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1))
         pred_n = img / mx
         targ_n = target / mx
 
