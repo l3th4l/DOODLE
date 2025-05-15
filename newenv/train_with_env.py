@@ -248,7 +248,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             else:
                 eff_step = step - warmup_steps
                 decay = max(1e-5, (cutoff - eff_step) / cutoff)
-                loss  = (parts['mse']*(1-decay+1e-5)
+                loss  = (mse_f * parts['mse']*(1-decay+1e-5)
                         + dist_f*parts['dist']*decay
                         + anti_spill*parts['bound'])
 
@@ -307,7 +307,7 @@ if __name__=="__main__":
     
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=25)
-    p.add_argument("--num_batches", type=int, default=3)
+    p.add_argument("--num_batches", type=int, default=1)
     p.add_argument("--steps",      type=int, default=5000)
     p.add_argument("--T",          type=int, default=4)
     p.add_argument("--k",          type=int, default=4)
@@ -317,11 +317,15 @@ if __name__=="__main__":
     p.add_argument("--disable_scheduler", type=bool, default=False)
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
-    p.add_argument("--dist_f",     type=float, default=1e4,
+    p.add_argument("--dist_f",     type=float, default=1.5e4,
                    help="Weight of the distance loss term.")
-    p.add_argument("--mse_f",     type=float, default=1e4,
+    p.add_argument("--mse_f",     type=float, default=1.0,
                    help="Weight of the distance loss term.")
-    p.add_argument("--warmup_steps", type=int, default=500,
+    p.add_argument("--new_errors_every_reset", type=bool, default=False,
+                   help="Whether to resample errors every reset.")
+    p.add_argument("--new_sun_pos_every_reset", type=bool, default=False,
+                   help="Whether to sample a new sun position every reset.")
+    p.add_argument("--warmup_steps", type=int, default=40,
                    help="Number of initial steps that use only the boundary "
                         "loss before switching to the full loss.")
     args = p.parse_args()
