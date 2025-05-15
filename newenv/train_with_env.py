@@ -276,8 +276,12 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
             opt.step()
             if not args.disable_scheduler and step > warmup_steps:
-                sched.step(parts['mse'].item())
-
+                if args.scheduler == "plateau":
+                    sched.step(parts['mse'].item())
+                elif args.scheduler == "cyclic":
+                    sched.step()
+                elif args.scheduler == "exp":
+                    sched.step()
         # ------------------------------------------------------------
         # log train and test loss
         
