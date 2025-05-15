@@ -224,6 +224,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     # decay-schedule params
     anti_spill = args.anti_spill
     dist_f     = args.dist_f
+    mse_f     = 
     # warmup-schedule params
     warmup_steps = args.warmup_steps
     active_training_steps = max(1, args.steps - warmup_steps)
@@ -263,6 +264,10 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         # ------------------------------------------------------------
         # log train and test loss
         if step%100==0 or step==args.steps-1:
+            #print average gradients wrt. params
+            for name, param in policy.named_parameters():
+                if param.grad is not None:
+                    writer.add_scalar(f"gradients/{name}", param.grad.mean(), step)
             # get test loss
             with torch.no_grad():
                 test_parts, _, _ = rollout(test_env, policy,
@@ -313,6 +318,8 @@ if __name__=="__main__":
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
     p.add_argument("--dist_f",     type=float, default=1e4,
+                   help="Weight of the distance loss term.")
+    p.add_argument("--mse_f",     type=float, default=1e4,
                    help="Weight of the distance loss term.")
     p.add_argument("--warmup_steps", type=int, default=500,
                    help="Number of initial steps that use only the boundary "
