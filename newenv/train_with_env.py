@@ -309,6 +309,10 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
+    p.add_argument("--anti_spill", type=float, default=1.5e4,
+                   help="Weight of the anti-spill loss term.")
+    p.add_argument("--dist_f",     type=float, default=1e4,
+                   help="Weight of the distance loss term.")
     p.add_argument("--warmup_steps", type=int, default=500,
                    help="Number of initial steps that use only the boundary "
                         "loss before switching to the full loss.")
