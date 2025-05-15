@@ -289,7 +289,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             print(f"Step {step} | "
                   f"loss {loss:.4f} | "
                   f"mse_train {parts['mse']:.2e} |"
-                  f"current_lr {opt.param_groups[0]['lr']:.2e} | ")
+                  f"current_lr {opt.param_groups[0]['lr']:.6f} | ")
 
         if step%100==0 or step==args.steps-1:
             #print average gradients wrt. params
@@ -345,6 +345,8 @@ if __name__=="__main__":
     p.add_argument("--disable_scheduler", type=bool, default=False)
     p.add_argument("--scheduler", type=str, default="exp",
                    help="Learning rate scheduler: plateau, cyclic, exp")
+    p.add_argument("--exp_decay", type=float, default=1.8,
+                   help="Exponential decay factor for the learning rate. (only for exp scheduler)")
     p.add_argument("--boundary_thresh", type=float, default=5e-3,
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
