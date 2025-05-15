@@ -275,7 +275,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
             opt.step()
-            if not args.disable_scheduler and step > warmup_steps:
+            if (not args.disable_scheduler) and (step > warmup_steps):
                 if args.scheduler == "plateau":
                     sched.step(parts['mse'].item())
                 elif args.scheduler == "cyclic":
