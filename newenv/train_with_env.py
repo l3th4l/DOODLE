@@ -180,20 +180,24 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     res=128
 
     # envs
-    train_env = HelioEnv(
-        heliostat_pos = heliostat_pos,
-        targ_pos = targ_pos,
-        targ_area = targ_area,
-        targ_norm = targ_norm,
-        sigma_scale=0.1,
-        error_scale_mrad=180.0,
-        initial_action_noise=0.0,
-        resolution=res,
-        batch_size=25,
-        device=args.device,
-        new_sun_pos_every_reset=False,
-        new_errors_every_reset=True,
-    )
+    train_envs_list = []
+    for i in range(args.num_batches):
+        train_env = HelioEnv(
+            heliostat_pos = heliostat_pos,
+            targ_pos = targ_pos,
+            targ_area = targ_area,
+            targ_norm = targ_norm,
+            sigma_scale=0.1,
+            error_scale_mrad=180.0,
+            initial_action_noise=0.0,
+            resolution=res,
+            batch_size=25,
+            device=args.device,
+            new_sun_pos_every_reset=False,
+            new_errors_every_reset=False,
+        )
+        train_envs_list.append(train_env)
+
 
     # envs
     test_env = HelioEnv(
@@ -227,29 +231,32 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     writer = SummaryWriter(f"runs_multi_error_env/{datetime.now():%m%d_%H%M%S}")
 
     for step in range(args.steps):
-        opt.zero_grad()
-        parts, pred_imgs, _ = rollout(train_env, policy,
-                              args.k, args.T, dev)
+        # get batch of envs
+        for i in range(args.num_batches):
+            train_env = train_envs_list[i]
+            opt.zero_grad()
+            parts, pred_imgs, _ = rollout(train_env, policy,
+                                args.k, args.T, dev)
 
-        # ------------------------------------------------------------
-        # Warm-up phase: rely solely on boundary loss to keep the flux
-        # inside the target while the policy “finds its feet”.
-        if step < warmup_steps:
-            loss = anti_spill * parts['bound']
-        else:
-            eff_step = step - warmup_steps
-            decay = max(1e-5, (cutoff - eff_step) / cutoff)
-            loss  = (parts['mse']*(1-decay+1e-5)
-                    + dist_f*parts['dist']*decay
-                    + anti_spill*parts['bound'])
+            # ------------------------------------------------------------
+            # Warm-up phase: rely solely on boundary loss to keep the flux
+            # inside the target while the policy “finds its feet”.
+            if step < warmup_steps:
+                loss = anti_spill * parts['bound']
+            else:
+                eff_step = step - warmup_steps
+                decay = max(1e-5, (cutoff - eff_step) / cutoff)
+                loss  = (parts['mse']*(1-decay+1e-5)
+                        + dist_f*parts['dist']*decay
+                        + anti_spill*parts['bound'])
 
-        loss.backward()
+            loss.backward()
 
-        # gradient clipping
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
-        opt.step()
-        sched.step(parts['mse'].item())
+            opt.step()
+            sched.step(parts['mse'].item())
 
         # ------------------------------------------------------------
         # log train and test loss
@@ -293,6 +300,7 @@ if __name__=="__main__":
     
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=25)
+    p.add_argument("--num_batches", type=int, default=3)
     p.add_argument("--steps",      type=int, default=5000)
     p.add_argument("--T",          type=int, default=4)
     p.add_argument("--k",          type=int, default=4)
