@@ -256,7 +256,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
             opt.step()
-            sched.step(parts['mse'].item())
+            if not args.disable_scheduler and step > warmup_steps:
+                sched.step(parts['mse'].item())
 
         # ------------------------------------------------------------
         # log train and test loss
@@ -307,6 +308,7 @@ if __name__=="__main__":
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
+    p.add_argument("--disable_scheduler", type=bool, default=False)
     p.add_argument("--warmup_steps", type=int, default=500,
                    help="Number of initial steps that use only the boundary "
                         "loss before switching to the full loss.")
