@@ -222,8 +222,9 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
     # decay-schedule params
-    anti_spill = 1.5e4
-    dist_f     = 1e4
+    anti_spill = args.anti_spill
+    dist_f     = args.dist_f
+    # warmup-schedule params
     warmup_steps = args.warmup_steps
     active_training_steps = max(1, args.steps - warmup_steps)
     cutoff = int(0.8 * active_training_steps)  # 80 % of post-warm-up steps
