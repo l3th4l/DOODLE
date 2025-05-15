@@ -226,7 +226,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
                          step_size_up=1000, mode='triangular')
     elif args.scheduler == "exp":
-        sched = ExponentialLR(opt, gamma=1.25)
+        sched = ExponentialLR(opt, gamma=args.exp_decay)
 
     # decay-schedule params
     anti_spill = args.anti_spill
@@ -275,7 +275,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
             opt.step()
-            if (not args.disable_scheduler) and (step > warmup_steps):
+            if (step > warmup_steps) : #(not args.disable_scheduler) and 
                 if args.scheduler == "plateau":
                     sched.step(parts['mse'].item())
                 elif args.scheduler == "cyclic":
