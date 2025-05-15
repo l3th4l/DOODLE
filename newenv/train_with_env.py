@@ -7,7 +7,7 @@ comparison of target vs predicted heat-maps (plus error) for one example.
 import math, argparse
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR, ExponentialLR
 from torch.utils.tensorboard import SummaryWriter
 from scipy.ndimage import distance_transform_edt
 from datetime import datetime
@@ -33,6 +33,7 @@ class CNNEncoder(nn.Module):
         return F.relu(self.proj(feat))
 # ---------------------------------------------------------------------------
 # Use Legacy Policy for now 
+'''
 class PolicyNet(nn.Module):
     def __init__(self, img_channels, num_heliostats, aux_dim,
                  enc_dim=128, lstm_hid=128, use_lstm=True):
@@ -132,7 +133,7 @@ class PolicyNet(nn.Module):
         normals = F.normalize(normals, dim=2)
 
         return normals, hx
-'''
+
 # ---------------------------------------------------------------------------
 def rollout(env, policy, k, T, device, use_max=False):
     """Run T steps, return dict of {mse, dist, bound} on final frame."""
@@ -219,7 +220,13 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     aux_dim = 3+N*3
     policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, use_lstm=args.use_lstm).to(dev)
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
-    sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
+    if args.scheduler == "plateau":
+        sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
+    elif args.scheduler == "cyclic":
+        sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
+                         step_size_up=1000, mode='triangular')
+    elif args.scheduler == "exp":
+        sched = ExponentialLR(opt, gamma=1.25)
 
     # decay-schedule params
     anti_spill = args.anti_spill
@@ -260,6 +267,10 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
             loss.backward()
 
+            # if loss is NaN, print current lr
+            if torch.isnan(loss):
+                print(f"NaN loss at step {step} with lr {opt.param_groups[0]['lr']}")
+
             # gradient clipping
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
@@ -269,6 +280,13 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
         # ------------------------------------------------------------
         # log train and test loss
+        
+        if step%25==0 or step==args.steps-1:
+            print(f"Step {step} | "
+                  f"loss {loss:.4f} | "
+                  f"mse_train {parts['mse']:.2e} |"
+                  f"current_lr {opt.param_groups[0]['lr']:.2e} | ")
+
         if step%100==0 or step==args.steps-1:
             #print average gradients wrt. params
             for name, param in policy.named_parameters():
@@ -321,6 +339,8 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
+    p.add_argument("--scheduler", type=str, default="exp",
+                   help="Learning rate scheduler: plateau, cyclic, exp")
     p.add_argument("--boundary_thresh", type=float, default=5e-3,
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
