@@ -232,6 +232,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
     writer = SummaryWriter(f"runs_multi_error_env/{datetime.now():%m%d_%H%M%S}")
 
+    last_boundary_loss = None
+
     for step in range(args.steps):
         # get batch of envs
         for i in range(args.num_batches):
@@ -243,9 +245,14 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             # ------------------------------------------------------------
             # Warm-up phase: rely solely on boundary loss to keep the flux
             # inside the target while the policy “finds its feet”.
-            if step < warmup_steps:
+            # save the boundary loss for later
+            last_boundary_loss = parts['bound'].item()
+
+            if (step < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
+                # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
+                if step == warmup_steps:
                 eff_step = step - warmup_steps
                 decay = max(1e-5, (cutoff - eff_step) / cutoff)
                 loss  = (mse_f * parts['mse']*(1-decay+1e-5)
@@ -315,6 +322,8 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
+    .add_argument("--boundary_thresh", type=float, default=5e-3,
+                   help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
     p.add_argument("--dist_f",     type=float, default=1.5e4,
