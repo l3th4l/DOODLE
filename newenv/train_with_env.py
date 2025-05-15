@@ -348,6 +348,10 @@ if __name__=="__main__":
                    help="Learning rate scheduler: plateau, cyclic, exp")
     p.add_argument("--exp_decay", type=float, default=1.8,
                    help="Exponential decay factor for the learning rate. (only for exp scheduler)")
+    p.add_argument("--step_size_up", type=int, default=1000,
+                   help="Step size up for the cyclic learning rate scheduler.")
+    p.add_argument("--step_size_down", type=int, default=1000,
+                   help="Step size down for the cyclic learning rate scheduler.")
     p.add_argument("--boundary_thresh", type=float, default=5e-3,
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
