@@ -321,7 +321,7 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
-    .add_argument("--boundary_thresh", type=float, default=5e-3,
+    p.add_argument("--boundary_thresh", type=float, default=5e-3,
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
