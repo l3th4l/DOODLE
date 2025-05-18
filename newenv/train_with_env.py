@@ -224,7 +224,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
     elif args.scheduler == "cyclic":
         sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
-                         step_size_up=args.step_size_up, mode='triangular')
+                         step_size_up=args.step_size_up, mode=args.scheduler_mode, gamma=args.scheduler_gamma,)
     elif args.scheduler == "exp":
         sched = ExponentialLR(opt, gamma=args.exp_decay)
 
@@ -255,7 +255,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             # save the boundary loss for later
             last_boundary_loss = parts['bound'].item()
 
-            if (step < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
+            if (args.num_batches * step + i < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
                 # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
@@ -275,7 +275,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
             opt.step()
-            if (step > warmup_steps) : #(not args.disable_scheduler) and 
+            if (args.num_batches * step + i > warmup_steps) : #(not args.disable_scheduler) and 
                 if args.scheduler == "plateau":
                     sched.step(parts['mse'].item())
                 elif args.scheduler == "cyclic":
@@ -331,6 +331,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
 # ---------------------------------------------------------------------------
 if __name__=="__main__":
+    
     torch.manual_seed(10)
     np.random.seed(10)
     
@@ -346,9 +347,13 @@ if __name__=="__main__":
     p.add_argument("--disable_scheduler", type=bool, default=False)
     p.add_argument("--scheduler", type=str, default="exp",
                    help="Learning rate scheduler: plateau, cyclic, exp")
+    p.add_argument("--scheduler_mode", type=str, default="triangular2",
+                   help="Cyclic learning rate scheduler mode: triangular, triangular2, exp_range")
+    p.add_argument("--scheduler_gamma", type=float, default=0.99,
+                   help="Cyclic learning rate scheduler gamma: 0.99 for exp_range")
     p.add_argument("--exp_decay", type=float, default=1.8,
                    help="Exponential decay factor for the learning rate. (only for exp scheduler)")
-    p.add_argument("--step_size_up", type=int, default=1000,
+    p.add_argument("--step_size_up", type=int, default=300,
                    help="Step size up for the cyclic learning rate scheduler.")
     p.add_argument("--step_size_down", type=int, default=1000,
                    help="Step size down for the cyclic learning rate scheduler.")
@@ -356,7 +361,7 @@ if __name__=="__main__":
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
-    p.add_argument("--dist_f",     type=float, default=1.5e4,
+    p.add_argument("--dist_f",     type=float, default=1.0e4,
                    help="Weight of the distance loss term.")
     p.add_argument("--mse_f",     type=float, default=1.0,
                    help="Weight of the distance loss term.")
