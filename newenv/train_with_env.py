@@ -167,7 +167,7 @@ def rollout(env, policy, k, T, device, use_max=False):
     return loss_dict, img, hist 
 
 # ---------------------------------------------------------------------------
-def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
+def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
     # device
     dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
     torch.set_default_device(dev)
@@ -240,6 +240,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     writer = SummaryWriter(f"runs_multi_error_env/{datetime.now():%m%d_%H%M%S}")
 
     last_boundary_loss = None
+    last_mse_loss = None
+    best_mse_loss = None
 
     for step in range(args.steps):
         # get batch of envs
@@ -270,7 +272,13 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             # if loss is NaN, print current lr
             if torch.isnan(loss):
                 print(f"NaN loss at step {step} with lr {opt.param_groups[0]['lr']}")
-                return np.nan
+                if last_mse_loss is not None:
+                    print(f"last mse loss {last_mse_loss}")
+                    print(f"best mse loss {best_mse_loss}")
+                    return best_mse_loss if return_best_mse else last_mse_loss
+                else:
+                    print("No last mse loss")
+                    return np.nan
 
             # gradient clipping
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
@@ -306,7 +314,11 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             print(f"[{step:4d}] loss {loss:.4f} | "
                   f"mse_train{parts['mse']:.2e} dist_train {parts['dist']:.2e} "
                   f"bound_train {parts['bound']:.2e} | test_mse {test_parts['mse']:.2e} test_bound {test_parts['bound']:.2e}")
+            
+            last_mse_loss = test_parts['mse'].item()
+            best_mse_loss = last_mse_loss if best_mse_loss is None else min(best_mse_loss, last_mse_loss)
 
+            # log test loss
             writer.add_scalar("mse/test", test_parts['mse'], step)
             writer.add_scalar("bound/test", test_parts['bound'], step)
 
@@ -331,7 +343,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
     writer.close()
 
-    return test_parts['mse'].item()
+    return best_mse_loss if return_best_mse else last_mse_loss
 
 # ---------------------------------------------------------------------------
 if __name__=="__main__":

@@ -35,11 +35,11 @@ def default_args() -> argparse.Namespace:
     return types.SimpleNamespace(
         batch_size              = 25,
         num_batches             = 5,
-        steps                   = 5_000,
+        steps                   = 3_000,
         T                       = 4,
         k                       = 4,
         lr                      = 2e-4,          # ← will be overwritten
-        device                  = "cuda:1",
+        device                  = "cuda:2",
         use_lstm                = False,
         disable_scheduler       = False,
         scheduler               = "cyclic",      # ← hard-wired
@@ -64,7 +64,7 @@ def objective(trial: optuna.Trial) -> float:
     args            = default_args()
 
     # --- hyper-parameters to optimise --------------------------------------#
-    args.lr              = trial.suggest_loguniform("lr", 1e-5, 1e-3)
+    args.lr              = trial.suggest_loguniform("lr", 1e-4, 1.18e-3)
     args.scheduler_mode  = trial.suggest_categorical(
                                 "scheduler_mode",
                                 ["triangular", "triangular2", "exp_range"])
@@ -75,7 +75,7 @@ def objective(trial: optuna.Trial) -> float:
         # gamma is ignored by PyTorch when mode != 'exp_range'
         args.scheduler_gamma = 1.0
 
-    args.step_size_up    = trial.suggest_int("step_size_up", 50, 500, step=50)
+    args.step_size_up    = trial.suggest_int("step_size_up", 50, 1000, step=50)
 
     # Make the down-ramp at least as long as up-ramp (keeps total cycle ≥ step_size_up*2)
     args.step_size_down  = max(args.step_size_up, args.step_size_down)
@@ -84,7 +84,7 @@ def objective(trial: optuna.Trial) -> float:
     # Run a single training session and capture its test MSE                #
     # ---------------------------------------------------------------------- #
     try:
-        mse = train_and_eval(args, plot_heatmaps_in_tensorboard=False)
+        mse = train_and_eval(args, plot_heatmaps_in_tensorboard=True)
     except Exception as e:
         # Any runtime exception or keyboard interrupt → prune the trial
         traceback.print_exc()
