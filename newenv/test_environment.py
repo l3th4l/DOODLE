@@ -24,6 +24,7 @@ def make_distance_maps(imgs, thr=0.5):
     return torch.tensor(np.stack(maps), dtype=torch.float32, device=imgs.device)
 
 # boundary loss function
+#NOTE: the boundary is now 75% of what it was before
 def boundary(vects, 
             heliostat_pos, 
             targ_pos, 
@@ -44,7 +45,7 @@ def boundary(vects,
     xl = torch.einsum('bij,j->bi', local, u)
     yl = torch.einsum('bij,j->bi', local, v)
     hw, hh = targ_area[0]/2, targ_area[1]/2
-    dx = F.relu(xl.abs()-hw); dy = F.relu(yl.abs()-hh)
+    dx = F.relu(xl.abs()-hw*0.75); dy = F.relu(yl.abs()-hh*0.75)
     dist = torch.sqrt(dx*dx+dy*dy+1e-8)
     inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
     return (dist*(~inside).float()).mean()

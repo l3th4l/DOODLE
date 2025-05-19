@@ -7,7 +7,7 @@ comparison of target vs predicted heat-maps (plus error) for one example.
 import math, argparse
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR, ExponentialLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR
 from torch.utils.tensorboard import SummaryWriter
 from scipy.ndimage import distance_transform_edt
 from datetime import datetime
@@ -220,13 +220,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
     aux_dim = 3+N*3
     policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, use_lstm=args.use_lstm).to(dev)
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
-    if args.scheduler == "plateau":
-        sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
-    elif args.scheduler == "cyclic":
-        sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
-                         step_size_up=args.step_size_up, mode=args.scheduler_mode, gamma=args.scheduler_gamma,)
-    elif args.scheduler == "exp":
-        sched = ExponentialLR(opt, gamma=args.exp_decay)
+    sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
 
     # decay-schedule params
     anti_spill = args.anti_spill
@@ -255,7 +249,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
             # save the boundary loss for later
             last_boundary_loss = parts['bound'].item()
 
-            if (args.num_batches * step + i < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
+            if (step < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
                 # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
@@ -267,32 +261,15 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
             loss.backward()
 
-            # if loss is NaN, print current lr
-            if torch.isnan(loss):
-                print(f"NaN loss at step {step} with lr {opt.param_groups[0]['lr']}")
-                return np.nan
-
             # gradient clipping
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
 
             opt.step()
-            if (args.num_batches * step + i > warmup_steps) : #(not args.disable_scheduler) and 
-                if args.scheduler == "plateau":
-                    sched.step(parts['mse'].item())
-                elif args.scheduler == "cyclic":
-                    sched.step()
-                elif args.scheduler == "exp":
-                    sched.step()
+            if not args.disable_scheduler and step > warmup_steps:
+                sched.step(parts['mse'].item())
+
         # ------------------------------------------------------------
         # log train and test loss
-
-        
-        if step%25==0 or step==args.steps-1:
-            print(f"Step {step} | "
-                  f"loss {loss:.4f} | "
-                  f"mse_train {parts['mse']:.2e} |"
-                  f"current_lr {opt.param_groups[0]['lr']:.6f} | ")
-
         if step%100==0 or step==args.steps-1:
             #print average gradients wrt. params
             for name, param in policy.named_parameters():
@@ -314,7 +291,6 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
         writer.add_scalar("loss/mse",   parts['mse'], step)
         writer.add_scalar("loss/dist",  parts['dist'], step)
         writer.add_scalar("loss/bound", parts['bound'], step)
-        writer.add_scalar("hyperparams/lr", opt.param_groups[0]['lr'], step)
 
         if plot_heatmaps_in_tensorboard and (step % 100 == 0):
             imgs = pred_imgs
@@ -331,11 +307,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True):
 
     writer.close()
 
-    return test_parts['mse'].item()
-
 # ---------------------------------------------------------------------------
 if __name__=="__main__":
-    
     torch.manual_seed(10)
     np.random.seed(10)
     
@@ -349,23 +322,11 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
-    p.add_argument("--scheduler", type=str, default="exp",
-                   help="Learning rate scheduler: plateau, cyclic, exp")
-    p.add_argument("--scheduler_mode", type=str, default="triangular2",
-                   help="Cyclic learning rate scheduler mode: triangular, triangular2, exp_range")
-    p.add_argument("--scheduler_gamma", type=float, default=0.99,
-                   help="Cyclic learning rate scheduler gamma: 0.99 for exp_range")
-    p.add_argument("--exp_decay", type=float, default=1.8,
-                   help="Exponential decay factor for the learning rate. (only for exp scheduler)")
-    p.add_argument("--step_size_up", type=int, default=300,
-                   help="Step size up for the cyclic learning rate scheduler.")
-    p.add_argument("--step_size_down", type=int, default=1000,
-                   help="Step size down for the cyclic learning rate scheduler.")
     p.add_argument("--boundary_thresh", type=float, default=5e-3,
                    help="Upper threshold for boundary loss.")
     p.add_argument("--anti_spill", type=float, default=1.5e4,
                    help="Weight of the anti-spill loss term.")
-    p.add_argument("--dist_f",     type=float, default=1.0e4,
+    p.add_argument("--dist_f",     type=float, default=1.5e4,
                    help="Weight of the distance loss term.")
     p.add_argument("--mse_f",     type=float, default=1.0,
                    help="Weight of the distance loss term.")
