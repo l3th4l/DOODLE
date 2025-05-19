@@ -135,7 +135,7 @@ class PolicyNet(nn.Module):
         return normals, hx
 
 # ---------------------------------------------------------------------------
-def rollout(env, policy, k, T, device, use_max=False):
+def rollout(env, policy, k, T, device, use_mean=False):
     """Run T steps, return dict of {mse, dist, bound} on final frame."""
     B = env.batch_size
     # init noisy actions & first image
@@ -149,22 +149,37 @@ def rollout(env, policy, k, T, device, use_max=False):
     hist = torch.zeros(B, k, res, res, device=device)
     hist[:, -1] = img.clone()
 
+    #mean loss dict
+    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0}
+
     hx = None
     for _ in range(T):
         net_img = hist.unsqueeze(2)           # (B,k,1,H,W)
 
+        '''
         if not(hx == None):
             normals, hx = policy(net_img.detach(), aux.detach(), (hx[0].detach(), hx[1]))
         else:
             normals, hx = policy(net_img.detach(), aux.detach(), hx)
+        '''
+        normals, hx = policy(net_img.detach(), aux.detach(), hx)
 
-        state_dict, loss_dict = env.step(normals)
+        state_dict, loss_dict = env.step(normals)  
+        
+        if use_mean:
+            # accumulate losses
+            mean_loss_dict['mse'] = mean_loss_dict['mse'] + (1/T) * loss_dict['mse']
+            mean_loss_dict['dist'] = mean_loss_dict['dist'] + (1/T) * loss_dict['dist']
+            mean_loss_dict['bound'] = mean_loss_dict['bound'] + (1/T) * loss_dict['bound']
 
         img = state_dict['img']            # (B,1,H,W)
         hist = torch.roll(hist, -1, dims=1)
         hist[:, -1] = img
 
-    return loss_dict, img, hist 
+    if use_mean:
+        return mean_loss_dict, img, hist
+    else:
+        return loss_dict, img, hist 
 
 # ---------------------------------------------------------------------------
 def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
