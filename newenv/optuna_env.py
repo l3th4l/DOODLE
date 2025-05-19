@@ -34,7 +34,7 @@ def default_args() -> argparse.Namespace:
     """Return an argparse.Namespace with the same defaults as train_policy.py."""
     return types.SimpleNamespace(
         batch_size              = 25,
-        num_batches             = 1,
+        num_batches             = 5,
         steps                   = 5_000,
         T                       = 4,
         k                       = 4,
