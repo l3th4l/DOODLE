@@ -165,7 +165,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
         normals, hx = policy(net_img.detach(), aux.detach(), hx)
 
         state_dict, loss_dict = env.step(normals)  
-        
+
         if use_mean:
             # accumulate losses
             mean_loss_dict['mse'] = mean_loss_dict['mse'] + (1/T) * loss_dict['mse']
@@ -264,7 +264,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             train_env = train_envs_list[i]
             opt.zero_grad()
             parts, pred_imgs, _ = rollout(train_env, policy,
-                                args.k, args.T, dev)
+                                args.k, args.T, dev, use_mean=args.use_mean)
 
             # ------------------------------------------------------------
             # Warm-up phase: rely solely on boundary loss to keep the flux
@@ -376,6 +376,8 @@ if __name__=="__main__":
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
     p.add_argument("--disable_scheduler", type=bool, default=False)
+    p.add_argument("--use_mean", type=bool, default=False,
+                   help="Whether to use mean loss over the batch.")
     p.add_argument("--scheduler", type=str, default="exp",
                    help="Learning rate scheduler: plateau, cyclic, exp")
     p.add_argument("--scheduler_mode", type=str, default="triangular2",
