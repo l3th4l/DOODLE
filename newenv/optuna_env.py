@@ -81,9 +81,6 @@ def objective(trial: optuna.Trial) -> float:
         args.scheduler_mode  = trial.suggest_categorical(
                                     "scheduler_mode",
                                     ["triangular", "triangular2"])
-        else:
-            # gamma is ignored by PyTorch when mode != 'exp_range'
-            args.scheduler_gamma = 1.0
 
     args.step_size_up    = trial.suggest_int("step_size_up", 100, 1000, step=50)
 
