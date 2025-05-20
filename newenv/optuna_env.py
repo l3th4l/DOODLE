@@ -74,7 +74,7 @@ def objective(trial: optuna.Trial) -> float:
 
     if args.scheduler == "plateau":
         #suggest patience and reduce_lr_factor
-        args.patience = trial.suggest_int("scheduler_patience", 50, 150, step=10)         
+        args.patience = trial.suggest_int("scheduler_patience", 250, 750, step=50)         
         args.reduce_lr_factor = trial.suggest_float("scheduler_factor", 0.3, 0.8, step=0.1) 
 
     elif args.scheduler == "cyclic":
