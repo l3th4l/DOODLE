@@ -33,14 +33,14 @@ from train_with_env import train_and_eval   # your original file
 def default_args() -> argparse.Namespace:
     """Return an argparse.Namespace with the same defaults as train_policy.py."""
     return types.SimpleNamespace(
-        batch_size              = 25,
+        batch_size              = 30,
         num_batches             = 5,
-        steps                   = 3_000,
+        steps                   = 4_000,
         T                       = 4,
         k                       = 4,
         lr                      = 2e-4,          # ← will be overwritten
         device                  = "cuda:2",
-        use_lstm                = False,
+        use_lstm                = True,
         disable_scheduler       = False,
         scheduler               = "cyclic",      # ← hard-wired
         scheduler_mode          = "triangular2", # ← will be overwritten
@@ -48,13 +48,16 @@ def default_args() -> argparse.Namespace:
         exp_decay               = 1.8,           # ignored (non-exp scheduler)
         step_size_up            = 300,           # ← will be overwritten
         step_size_down          = 1_000,
-        boundary_thresh         = 5e-3,
+        boundary_thresh         = 2e-4,
         anti_spill              = 1.5e4,
         dist_f                  = 1.0e4,
         mse_f                   = 1.0,
         new_errors_every_reset  = False,
         new_sun_pos_every_reset = False,
-        warmup_steps            = 40,
+        warmup_steps            = 80,
+        use_mean                = True,          # ← will be overwritten
+        scheduler_patience      = 50,           # ← may be overwritten
+        scheduler_factor        = 0.5,           # ← may be overwritten
     )
 
 # ---------------------------------------------------------------------------#
@@ -65,20 +68,28 @@ def objective(trial: optuna.Trial) -> float:
 
     # --- hyper-parameters to optimise --------------------------------------#
     args.lr              = trial.suggest_loguniform("lr", 1e-4, 1.18e-3)
-    args.scheduler_mode  = trial.suggest_categorical(
-                                "scheduler_mode",
-                                ["triangular", "triangular2", "exp_range"])
-    if args.scheduler_mode == "exp_range":
-        args.scheduler_gamma = trial.suggest_float(
-                                "scheduler_gamma", 0.85, 0.999, step=0.001)
-    else:
-        # gamma is ignored by PyTorch when mode != 'exp_range'
-        args.scheduler_gamma = 1.0
+    args.scheduler       = trial.suggest_categorical(
+                                "scheduler", 
+                                ["cyclic", "plateau"])
 
-    args.step_size_up    = trial.suggest_int("step_size_up", 50, 1000, step=50)
+    if args.scheduler == "plateau":
+        #suggest patience and reduce_lr_factor
+        args.patience = trial.suggest_int("scheduler_patience", 50, 150, step=10)         
+        args.reduce_lr_factor = trial.suggest_float("scheduler_factor", 0.3, 0.8, step=0.1) 
 
-    # Make the down-ramp at least as long as up-ramp (keeps total cycle ≥ step_size_up*2)
-    args.step_size_down  = max(args.step_size_up, args.step_size_down)
+    elif args.scheduler == "cyclic":
+        args.scheduler_mode  = trial.suggest_categorical(
+                                    "scheduler_mode",
+                                    ["triangular", "triangular2"])
+        else:
+            # gamma is ignored by PyTorch when mode != 'exp_range'
+            args.scheduler_gamma = 1.0
+
+    args.step_size_up    = trial.suggest_int("step_size_up", 100, 1000, step=50)
+
+
+    args.use_mean        = trial.suggest_categorical(
+                                "use_mean", [True, False])
 
     # ---------------------------------------------------------------------- #
     # Run a single training session and capture its test MSE                #

@@ -236,7 +236,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, use_lstm=args.use_lstm).to(dev)
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if args.scheduler == "plateau":
-        sched = ReduceLROnPlateau(opt, 'min', patience=50, factor=0.27)
+        sched = ReduceLROnPlateau(opt, 'min', patience=args.scheduler_patience,
+                                 factor=args.scheduler_factor, verbose=True)
     elif args.scheduler == "cyclic":
         sched = CyclicLR(opt, base_lr=1e-5, max_lr=args.lr,
                          step_size_up=args.step_size_up, mode=args.scheduler_mode, gamma=args.scheduler_gamma,)
@@ -380,6 +381,10 @@ if __name__=="__main__":
                    help="Whether to use mean loss over the batch.")
     p.add_argument("--scheduler", type=str, default="exp",
                    help="Learning rate scheduler: plateau, cyclic, exp")
+    p.add_argument("--scheduler_patience", type=int, default=50,
+                   help="Patience for the plateau scheduler.")
+    p.add_argument("--scheduler_factor", type=float, default=0.27,
+                   help="Factor for the plateau scheduler.")
     p.add_argument("--scheduler_mode", type=str, default="triangular2",
                    help="Cyclic learning rate scheduler mode: triangular, triangular2, exp_range")
     p.add_argument("--scheduler_gamma", type=float, default=0.99,
