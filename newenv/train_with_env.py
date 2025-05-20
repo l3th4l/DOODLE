@@ -57,6 +57,7 @@ class PolicyNet(nn.Module):
         return F.normalize(normals, dim=2), hx
 
 '''
+'''
 class PolicyNet(nn.Module):
     def __init__(self,
                  img_channels: int,
@@ -129,6 +130,108 @@ class PolicyNet(nn.Module):
         # concatenate aux features and predict
         x       = torch.cat([feat, aux], dim=1)    # (B, feat_dim+aux_dim)
         normals = self.head(x)                     # (B, num_h*3)
+        normals = normals.view(B, self.num_h, 3)
+        normals = F.normalize(normals, dim=2)
+
+        return normals, hx
+'''
+
+class PolicyNet(nn.Module):
+    def __init__(self,
+                 img_channels: int,
+                 num_heliostats: int,
+                 aux_dim: int,
+                 enc_dim: int = 128,
+                 lstm_hid: int = 128,
+                 transformer_layers: int = 2,
+                 transformer_heads: int = 8,
+                 architecture: str = "lstm", 
+                 use_lstm: bool = True):  # options: 'mlp', 'lstm', 'transformer'
+        """
+        Args:
+            img_channels: number of image channels in input
+            num_heliostats: how many normals to predict
+            aux_dim: dimension of extra (non-image) features
+            enc_dim: output dimension of CNNEncoder per frame
+            lstm_hid: hidden size of the LSTM (used if architecture='lstm')
+            transformer_layers: number of transformer encoder layers (if 'transformer')
+            transformer_heads: number of attention heads (if 'transformer')
+            architecture: one of 'mlp', 'lstm', 'transformer'
+        """
+        super().__init__()
+        self.num_h = num_heliostats
+        self.arch = architecture.lower()
+
+        # shared CNN encoder
+        self.encoder = CNNEncoder(img_channels, enc_dim)
+
+        if self.arch == 'lstm':
+            if not use_lstm:
+                #warn that "use_lstm" is ignored
+                print("Warning: 'use_lstm' is ignored and deprecated. "
+                      "Use 'architecture' instead.")
+            # recurrent LSTM path
+            self.rnn = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
+            feat_dim = lstm_hid
+        elif self.arch == 'transformer':
+            # transformer path
+            encoder_layer = nn.TransformerEncoderLayer(d_model=enc_dim,
+                                                       nhead=transformer_heads,
+                                                       batch_first=True)
+            self.transformer = nn.TransformerEncoder(encoder_layer,
+                                                     num_layers=transformer_layers)
+            feat_dim = enc_dim
+        elif self.arch == 'mlp':
+            # non-recurrent MLP-only path
+            feat_dim = enc_dim
+        else:
+            raise ValueError(f"Unknown architecture '{architecture}'. Choose 'mlp', 'lstm', or 'transformer'.")
+
+        # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*3
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim + aux_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_heliostats * 3)
+        )
+
+    def forward(self,
+                img_seq: torch.Tensor,
+                aux: torch.Tensor,
+                hx: tuple = None):
+        """
+        Args:
+            img_seq: (B, T, C, H, W) input image sequence
+            aux:     (B, aux_dim) auxiliary features
+            hx:      optional LSTM hidden state (only used if arch='lstm')
+        Returns:
+            normals: (B, num_heliostats, 3) unit-length surface normals
+            hx:      new LSTM state if arch='lstm', else None
+        """
+        B, T, C, H, W = img_seq.shape
+
+        # flatten frames into batch for CNN
+        x = img_seq.view(B * T, C, H, W)
+        enc = self.encoder(x)            # (B*T, enc_dim)
+        enc = enc.view(B, T, -1)         # (B, T, enc_dim)
+
+        if self.arch == 'lstm':
+            # LSTM encoder
+            out, hx = self.rnn(enc, hx)
+            feat = out[:, -1, :]
+        elif self.arch == 'transformer':
+            # Transformer encoder (batch_first)
+            # enc: (B, T, enc_dim)
+            trans_out = self.transformer(enc)  # (B, T, enc_dim)
+            feat = trans_out[:, -1, :]
+            hx = None
+        else:
+            # MLP path uses last-frame encoding
+            feat = enc[:, -1, :]
+            hx = None
+
+        # concatenate aux features and predict
+        x = torch.cat([feat, aux], dim=1)      # (B, feat_dim+aux_dim)
+        normals = self.head(x)                 # (B, num_h*3)
         normals = normals.view(B, self.num_h, 3)
         normals = F.normalize(normals, dim=2)
 
@@ -233,7 +336,11 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
     # model + opt
     aux_dim = 3+N*3
-    policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, use_lstm=args.use_lstm).to(dev)
+    policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, architecture= args.architecture,
+                        lstm_hid=args.lstm_hid,
+                        transformer_layers=args.transformer_layers,
+                        transformer_heads=args.transformer_heads,).to(device=dev)  
+
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if args.scheduler == "plateau":
         sched = ReduceLROnPlateau(opt, 'min', patience=args.scheduler_patience,
@@ -376,6 +483,11 @@ if __name__=="__main__":
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
+    p.add_argument("--architecture", type=str, default="lstm",
+                   help="Network architecture: lstm, transformer, mlp")
+    p.add_argument("--lstm_hid",  type=int, default=128)
+    p.add_argument("--transformer_layers", type=int, default=2)
+    p.add_argument("--transformer_heads", type=int, default=8)
     p.add_argument("--disable_scheduler", type=bool, default=False)
     p.add_argument("--use_mean", type=bool, default=False,
                    help="Whether to use mean loss over the batch.")
