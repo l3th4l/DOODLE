@@ -20,8 +20,12 @@ torch.autograd.set_detect_anomaly(True)
 # ---------------------------------------------------------------------------
 # anomaly loggers
 def log_if_nan(tensor, name):
-    if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-        print(f"⚠️  NaN/Inf found in {name}: {tensor}")
+    if isinstance(tensor, torch.Tensor):
+        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+            print(f"⚠️  NaN/Inf found in {name}: {tensor}")
+    elif isinstance(tensor, tuple):
+        for i, t in enumerate(tensor):
+            log_if_nan(t, f"{name}[{i}]")
 
 # ---------------------------------------------------------------------------
 class CNNEncoder(nn.Module):
