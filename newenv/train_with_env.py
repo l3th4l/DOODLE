@@ -267,6 +267,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
 
     #mean loss dict
     mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0}
+    mse_over_t = []
 
     hx = None
     for _ in range(T):
@@ -282,14 +283,17 @@ def rollout(env, policy, k, T, device, use_mean=False):
             mean_loss_dict['dist'] = mean_loss_dict['dist'] + (1/T) * loss_dict['dist']
             mean_loss_dict['bound'] = mean_loss_dict['bound'] + (1/T) * loss_dict['bound']
 
+        mse_over_t.append(loss_dict['mse'].item())
+
+
         img = state_dict['img']            # (B,1,H,W)
         hist = torch.roll(hist, -1, dims=1)
         hist[:, -1] = img
 
     if use_mean:
-        return mean_loss_dict, img, hist
+        return mean_loss_dict, img, hist, mse_over_t
     else:
-        return loss_dict, img, hist 
+        return loss_dict, img, hist, mse_over_t
 
 # ---------------------------------------------------------------------------
 def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
@@ -298,7 +302,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     torch.set_default_device(dev)
 
     # geometry
-    N = 50
+    N = args.num_heliostats
+    # heliostat positions
     heliostat_pos = torch.rand(N,3,device=dev)*10; heliostat_pos[:,2]=0
     targ_pos = torch.tensor([0.,-5.,0.],device=dev)
     targ_norm= torch.tensor([0., 1.,0.], device=dev)
@@ -388,7 +393,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         for i in range(args.num_batches):
             train_env = train_envs_list[i]
             opt.zero_grad()
-            parts, pred_imgs, _ = rollout(train_env, policy,
+            parts, pred_imgs, _, train_mse_over_t = rollout(train_env, policy,
                                 args.k, args.T, dev, use_mean=args.use_mean)
 
             # ------------------------------------------------------------
@@ -448,7 +453,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     writer.add_scalar(f"gradients/{name}", param.grad.mean(), step)
             # get test loss
             with torch.no_grad():
-                test_parts, _, _ = rollout(test_env, policy,
+                test_parts, _, _, test_mse_over_t = rollout(test_env, policy,
                                            args.k, args.T, dev)
 
             print(f"[{step:4d}] loss {loss:.4f} | "
@@ -462,11 +467,21 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             writer.add_scalar("mse/test", test_parts['mse'], step)
             writer.add_scalar("bound/test", test_parts['bound'], step)
 
+            # log test mse over time for testing
+            if step > warmup_steps:
+                for t in range(args.T):
+                    writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], step / t)
+
         writer.add_scalar("loss/total", loss.item(), step)
         writer.add_scalar("loss/mse",   parts['mse'], step)
         writer.add_scalar("loss/dist",  parts['dist'], step)
         writer.add_scalar("loss/bound", parts['bound'], step)
         writer.add_scalar("hyperparams/lr", opt.param_groups[0]['lr'], step)
+
+        # log train mse over time for training
+        if step > warmup_steps:
+            for t in range(args.T):
+                writer.add_scalar(f"mse/train_over_t/", train_mse_over_t[t], step / t)
 
         if plot_heatmaps_in_tensorboard and (step % 100 == 0):
             imgs = pred_imgs
@@ -490,6 +505,7 @@ if __name__=="__main__":
     
     
     p = argparse.ArgumentParser()
+    p.add_argument("--num_heliostats", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=25)
     p.add_argument("--num_batches", type=int, default=1)
     p.add_argument("--steps",      type=int, default=5000)
