@@ -16,6 +16,13 @@ import matplotlib.pyplot as plt
 from test_environment import HelioEnv  # your multi-error env
 
 
+torch.autograd.set_detect_anomaly(True)  
+# ---------------------------------------------------------------------------
+# anomaly loggers
+def log_if_nan(tensor, name):
+    if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+        print(f"⚠️  NaN/Inf found in {name}: {tensor}")
+
 # ---------------------------------------------------------------------------
 class CNNEncoder(nn.Module):
     def __init__(self, in_channels: int, out_dim: int=128):
@@ -336,6 +343,15 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                         lstm_hid=args.lstm_hid,
                         transformer_layers=args.transformer_layers,
                         transformer_heads=args.transformer_heads,).to(device=dev)  
+
+    # register anomaly hooks
+    for n, p in policy.named_parameters():
+        p.register_hook(lambda grad, n=n: log_if_nan(grad, f"grad {n}"))
+
+    for n, m in policy.named_modules():
+        m.register_forward_hook(
+            lambda mod, inp, out, n=n: log_if_nan(out, f"out {n}")
+        )
 
     opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if args.scheduler == "plateau":
