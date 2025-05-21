@@ -319,7 +319,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             targ_area = targ_area,
             targ_norm = targ_norm,
             sigma_scale=0.1,
-            error_scale_mrad=180.0,
+            error_scale_mrad=args.error_scale_mrad,
             initial_action_noise=0.0,
             resolution=res,
             batch_size=args.batch_size,
@@ -506,6 +506,7 @@ if __name__=="__main__":
     
     p = argparse.ArgumentParser()
     p.add_argument("--num_heliostats", type=int, default=50)
+    p.add_argument("--error_scale_mrad", type=float, default=90.0)
     p.add_argument("--batch_size", type=int, default=25)
     p.add_argument("--num_batches", type=int, default=1)
     p.add_argument("--steps",      type=int, default=5000)
