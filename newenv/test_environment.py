@@ -145,6 +145,8 @@ class HelioEnv(gym.Env):
         
         # precompute distance maps
         sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device),dim=1)
+        #make sure sun is always in the upper hemisphere (U coordinate is always positive)
+        sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
         radius   = math.hypot(1000,1000)
         self.sun_pos  = sun_dirs*radius
 
