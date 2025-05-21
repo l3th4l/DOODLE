@@ -206,7 +206,7 @@ class HelioEnv(gym.Env):
 
         
 
-        mse = F.mse_loss(pred_n, targ_n)
+        mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
         err = (pred_n - targ_n).abs()
         dist_l = (err * self.distance_maps).sum((1,2)).mean()
 
