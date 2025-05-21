@@ -237,6 +237,8 @@ class PolicyNet(nn.Module):
 
         return normals, hx
 
+#TODO See if ther is a problem with the dimensions of the input image
+#NOTE Apparently not but with k=T, we're not utilizing the power of the LSTM
 # ---------------------------------------------------------------------------
 def rollout(env, policy, k, T, device, use_mean=False):
     """Run T steps, return dict of {mse, dist, bound} on final frame."""
@@ -259,12 +261,6 @@ def rollout(env, policy, k, T, device, use_mean=False):
     for _ in range(T):
         net_img = hist.unsqueeze(2)           # (B,k,1,H,W)
 
-        '''
-        if not(hx == None):
-            normals, hx = policy(net_img.detach(), aux.detach(), (hx[0].detach(), hx[1]))
-        else:
-            normals, hx = policy(net_img.detach(), aux.detach(), hx)
-        '''
         normals, hx = policy(net_img.detach(), aux.detach(), hx)
 
         state_dict, loss_dict = env.step(normals)  
@@ -483,6 +479,8 @@ if __name__=="__main__":
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
+    p.add_argument("--grad_clip",  type=float, default=1e-7, 
+                   help="Gradient clipping threshold.")
     p.add_argument("--architecture", type=str, default="lstm",
                    help="Network architecture: lstm, transformer, mlp")
     p.add_argument("--lstm_hid",  type=int, default=128)
