@@ -36,6 +36,8 @@ def boundary(vects,
     u = target_east_axis #torch.tensor([1.,0.,0.], device=device)
     v = target_up_axis #torch.tensor([0.,0.,1.], device=device)
 
+    border_tolerance = 0.75
+
     dots = torch.einsum('bij,j->bi', vects, targ_norm)
     eps = 1e-6
     valid = (dots.abs() > eps)
@@ -45,7 +47,7 @@ def boundary(vects,
     xl = torch.einsum('bij,j->bi', local, u)
     yl = torch.einsum('bij,j->bi', local, v)
     hw, hh = targ_area[0]/2, targ_area[1]/2
-    dx = F.relu(xl.abs()-hw); dy = F.relu(yl.abs()-hh)
+    dx = F.relu(xl.abs()-hw*border_tolerance); dy = F.relu(yl.abs()-hh*border_tolerance)
     dist = torch.sqrt(dx*dx+dy*dy+1e-8)
     inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
     return (dist*(~inside).float()).mean()
