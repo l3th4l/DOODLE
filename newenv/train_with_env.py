@@ -400,7 +400,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     return np.nan
 
             # gradient clipping
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=args.grad_clip)
 
             opt.step()
             if (args.num_batches * step + i > warmup_steps) : #(not args.disable_scheduler) and 
