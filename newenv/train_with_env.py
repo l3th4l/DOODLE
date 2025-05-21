@@ -470,7 +470,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             # log test mse over time for testing
             if step > warmup_steps:
                 for t in range(args.T):
-                    writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], step / (t+1))
+                    writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], args.T*step + t)
 
         writer.add_scalar("loss/total", loss.item(), step)
         writer.add_scalar("loss/mse",   parts['mse'], step)
@@ -481,7 +481,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         # log train mse over time for training
         if step > warmup_steps:
             for t in range(args.T):
-                writer.add_scalar(f"mse/train_over_t/", train_mse_over_t[t], step / (t+1))
+                writer.add_scalar(f"mse/train_over_t/", train_mse_over_t[t], args.T*step + t)
 
         if plot_heatmaps_in_tensorboard and (step % 100 == 0):
             imgs = pred_imgs
