@@ -199,9 +199,12 @@ class HelioEnv(gym.Env):
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
-        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1))
+        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
+
         pred_n = img / mx
         targ_n = target / mx
+
+        
 
         mse = F.mse_loss(pred_n, targ_n)
         err = (pred_n - targ_n).abs()
@@ -218,6 +221,16 @@ class HelioEnv(gym.Env):
                         self.targ_norm, 
                         self.targ_area, 
                         u, v)
+
+        #assert no nan in metrics
+        assert not torch.isnan(mse).any(), "MSE is NaN"
+        assert not torch.isnan(dist_l).any(), "Distance loss is NaN"
+        assert not torch.isnan(bound).any(), "Boundary loss is NaN"
+        #assert no inf in metrics   
+        assert not torch.isinf(mse).any(), "MSE is Inf"
+        assert not torch.isinf(dist_l).any(), "Distance loss is Inf"
+        assert not torch.isinf(bound).any(), "Boundary loss is Inf"
+
 
         metrics = {'mse': mse, 'dist': dist_l, 'bound': bound}
         obs = {'img': img, 'aux': aux}
