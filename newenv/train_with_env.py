@@ -322,6 +322,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             new_sun_pos_every_reset=args.new_sun_pos_every_reset,
             new_errors_every_reset=args.new_errors_every_reset,
         )
+        train_env.seed(args.seed + i)
         train_envs_list.append(train_env)
 
 
@@ -487,8 +488,6 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 # ---------------------------------------------------------------------------
 if __name__=="__main__":
     
-    torch.manual_seed(10)
-    np.random.seed(10)
     
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=25)
@@ -540,5 +539,11 @@ if __name__=="__main__":
     p.add_argument("--warmup_steps", type=int, default=40,
                    help="Number of initial steps that use only the boundary "
                         "loss before switching to the full loss.")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed for reproducibility.") 
     args = p.parse_args()
+    
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
     train_and_eval(args)

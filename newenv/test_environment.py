@@ -235,3 +235,13 @@ class HelioEnv(gym.Env):
         metrics = {'mse': mse, 'dist': dist_l, 'bound': bound}
         obs = {'img': img, 'aux': aux}
         return obs, metrics
+
+    def seed(self, seed=None):
+        """
+        Set random seed for reproducibility.
+        Args:
+            seed (int): Random seed value.
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
