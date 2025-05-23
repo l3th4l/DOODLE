@@ -43,7 +43,7 @@ class CNNEncoder(nn.Module):
 '''
 class PolicyNet(nn.Module):
     def __init__(self, img_channels, num_heliostats, aux_dim,
-                 enc_dim=128, lstm_hid=128, use_lstm=True):
+                 enc_dim=128, lstm_hid=128):
         super().__init__()
         self.encoder = CNNEncoder(img_channels, enc_dim)
         self.lstm    = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
@@ -62,8 +62,8 @@ class PolicyNet(nn.Module):
         x = torch.cat([last, aux], dim=1)
         normals = self.head(x).view(B, self.num_h, 3)
         return F.normalize(normals, dim=2), hx
-
 '''
+
 class PolicyNet(nn.Module):
     def __init__(self,
                  img_channels: int,

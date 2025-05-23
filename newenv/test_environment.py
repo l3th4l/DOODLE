@@ -24,6 +24,7 @@ def make_distance_maps(imgs, thr=0.5):
     return torch.tensor(np.stack(maps), dtype=torch.float32, device=imgs.device)
 
 # boundary loss function
+#NOTE: the boundary is now 75% of what it was before
 def boundary(vects, 
             heliostat_pos, 
             targ_pos, 
@@ -35,6 +36,8 @@ def boundary(vects,
     u = target_east_axis #torch.tensor([1.,0.,0.], device=device)
     v = target_up_axis #torch.tensor([0.,0.,1.], device=device)
 
+    border_tolerance = 0.75
+
     dots = torch.einsum('bij,j->bi', vects, targ_norm)
     eps = 1e-6
     valid = (dots.abs() > eps)
@@ -44,7 +47,7 @@ def boundary(vects,
     xl = torch.einsum('bij,j->bi', local, u)
     yl = torch.einsum('bij,j->bi', local, v)
     hw, hh = targ_area[0]/2, targ_area[1]/2
-    dx = F.relu(xl.abs()-hw); dy = F.relu(yl.abs()-hh)
+    dx = F.relu(xl.abs()-hw*border_tolerance); dy = F.relu(yl.abs()-hh*border_tolerance)
     dist = torch.sqrt(dx*dx+dy*dy+1e-8)
     inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
     return (dist*(~inside).float()).mean()
@@ -64,6 +67,8 @@ class HelioEnv(gym.Env):
                  device='cuda',
                  new_sun_pos_every_reset=False,
                  new_errors_every_reset=True,
+                 use_error_mask=False, 
+                 error_mask_ratio=0.2
                 ):
         super(HelioEnv, self).__init__()
 
@@ -141,9 +146,15 @@ class HelioEnv(gym.Env):
             device=self.device,
         )
 
-        
+        # error computation parameters 
+        self.use_error_mask = use_error_mask
+        self.error_mask_ratio = error_mask_ratio
+
+
         # precompute distance maps
         sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device),dim=1)
+        #make sure sun is always in the upper hemisphere (U coordinate is always positive)
+        sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
         radius   = math.hypot(1000,1000)
         self.sun_pos  = sun_dirs*radius
 
@@ -190,8 +201,7 @@ class HelioEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
 
-        with torch.no_grad():
-            img = self.noisy_field.render(self.sun_pos, action)
+        img = self.noisy_field.render(self.sun_pos, action)
 
         # Compute auxiliary input
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
@@ -199,13 +209,28 @@ class HelioEnv(gym.Env):
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
-        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1).detach())
+        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
+
         pred_n = img / mx
         targ_n = target / mx
 
-        mse = F.mse_loss(pred_n, targ_n)
         err = (pred_n - targ_n).abs()
-        dist_l = (err * self.distance_maps).sum((1,2)).mean()
+        avg_error_per_heatmap = err.mean(dim=[-2, -1])
+
+        # create a mask for worst 20% of the heatmaps 
+        cutoff = torch.quantile(avg_error_per_heatmap, 1 - self.error_mask_ratio)
+        error_mask = (avg_error_per_heatmap > cutoff).float()
+        error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
+
+        if self.use_error_mask:
+
+            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6)
+            dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
+
+        else:
+
+            mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
+            dist_l = (err * self.distance_maps).sum((1,2)).mean()
 
         # Boundary error
         normals = action.view(self.batch_size, -1, 3)
@@ -219,6 +244,26 @@ class HelioEnv(gym.Env):
                         self.targ_area, 
                         u, v)
 
+        #assert no nan in metrics
+        assert not torch.isnan(mse).any(), "MSE is NaN"
+        assert not torch.isnan(dist_l).any(), "Distance loss is NaN"
+        assert not torch.isnan(bound).any(), "Boundary loss is NaN"
+        #assert no inf in metrics   
+        assert not torch.isinf(mse).any(), "MSE is Inf"
+        assert not torch.isinf(dist_l).any(), "Distance loss is Inf"
+        assert not torch.isinf(bound).any(), "Boundary loss is Inf"
+
+
         metrics = {'mse': mse, 'dist': dist_l, 'bound': bound}
         obs = {'img': img, 'aux': aux}
         return obs, metrics
+
+    def seed(self, seed=None):
+        """
+        Set random seed for reproducibility.
+        Args:
+            seed (int): Random seed value.
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)

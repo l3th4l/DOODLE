@@ -194,7 +194,7 @@ def train_batched(batch_size=25,
         decay_factor = max(1e-5, (cutoff - step) / cutoff)
 
         loss = (anti_spillage_factor * loss_bound
-                + anti_spillage_factor * loss_bound * decay_factor
+                #+ anti_spillage_factor * loss_bound * decay_factor
                 + mse_loss * (1-decay_factor + 1e-5)
                 + weighted_error.mean() * decay_factor *dist_factor)
 
