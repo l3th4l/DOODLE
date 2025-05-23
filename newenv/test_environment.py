@@ -67,6 +67,8 @@ class HelioEnv(gym.Env):
                  device='cuda',
                  new_sun_pos_every_reset=False,
                  new_errors_every_reset=True,
+                 use_error_mask=False, 
+                 error_mask_ratio=0.2
                 ):
         super(HelioEnv, self).__init__()
 
@@ -144,7 +146,11 @@ class HelioEnv(gym.Env):
             device=self.device,
         )
 
-        
+        # error computation parameters 
+        self.use_error_mask = use_error_mask
+        self.error_mask_ratio = error_mask_ratio
+
+
         # precompute distance maps
         sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device),dim=1)
         #make sure sun is always in the upper hemisphere (U coordinate is always positive)
@@ -208,11 +214,23 @@ class HelioEnv(gym.Env):
         pred_n = img / mx
         targ_n = target / mx
 
-        
-
-        mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
         err = (pred_n - targ_n).abs()
-        dist_l = (err * self.distance_maps).sum((1,2)).mean()
+        avg_error_per_heatmap = err.mean(dim=[-2, -1])
+
+        # create a mask for worst 20% of the heatmaps 
+        cutoff = torch.quantile(avg_error_per_heatmap, 1 - self.error_mask_ratio)
+        error_mask = (avg_error_per_heatmap > cutoff).float()
+        error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
+
+        if self.use_error_mask:
+
+            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6)
+            dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
+
+        else:
+
+            mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
+            dist_l = (err * self.distance_maps).sum((1,2)).mean()
 
         # Boundary error
         normals = action.view(self.batch_size, -1, 3)

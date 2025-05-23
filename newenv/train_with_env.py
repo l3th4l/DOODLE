@@ -326,6 +326,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             device=args.device,
             new_sun_pos_every_reset=args.new_sun_pos_every_reset,
             new_errors_every_reset=args.new_errors_every_reset,
+            use_error_mask=args.use_error_mask, 
+            error_mask_ratio=args.error_mask_ratio,
         )
         train_env.seed(args.seed + i)
         train_envs_list.append(train_env)
@@ -446,6 +448,11 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                   f"mse_train {parts['mse']:.2e} |"
                   f"current_lr {opt.param_groups[0]['lr']:.6f} | ")
 
+        #debug code 
+        '''
+        bad_suns = [train_env.sun_pos[i].detach().cpu().numpy() for i in range(50) if pred_imgs[i].amax() > 0.005]; good_suns = [train_env.sun_pos[i].detach().cpu().numpy() for i in range(50) if pred_imgs[i].amax() < 0.005]; import pandas as pd; pd.DataFrame({'value': good_suns + bad_suns, 'source': ['good'] * len(good_suns) + ['bad'] * len(bad_suns)}).to_csv('labeled_list.csv', index=False)
+        '''
+
         if step%100==0 or step==args.steps-1:
             #print average gradients wrt. params
             for name, param in policy.named_parameters():
@@ -558,6 +565,10 @@ if __name__=="__main__":
                         "loss before switching to the full loss.")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed for reproducibility.") 
+    p.add_argument("--use_error_mask", type=bool, default=False,
+                   help="Whether to use only bottom k'th percentile for loss calculation")
+    p.add_argument("--error_mask_ratio", type=float, default=0.2,
+                   help="Percentile to use for loss calculation (if using error mask)")
     args = p.parse_args()
     
     torch.manual_seed(args.seed)
