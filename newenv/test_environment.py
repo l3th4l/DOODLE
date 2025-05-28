@@ -32,11 +32,11 @@ def boundary(vects,
             targ_area, 
             target_east_axis,
             target_up_axis,
+            return_mean = True,
+            border_tolerance = 0.99
             ):
     u = target_east_axis #torch.tensor([1.,0.,0.], device=device)
     v = target_up_axis #torch.tensor([0.,0.,1.], device=device)
-
-    border_tolerance = 0.75
 
     dots = torch.einsum('bij,j->bi', vects, targ_norm)
     eps = 1e-6
@@ -50,7 +50,11 @@ def boundary(vects,
     dx = F.relu(xl.abs()-hw*border_tolerance); dy = F.relu(yl.abs()-hh*border_tolerance)
     dist = torch.sqrt(dx*dx+dy*dy+1e-8)
     inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
-    return (dist*(~inside).float()).mean()
+
+    if return_mean:
+        return (dist*(~inside).float()).mean()
+    else:
+        return dist*(~inside).float()
 
 class HelioEnv(gym.Env):
 
@@ -68,7 +72,9 @@ class HelioEnv(gym.Env):
                  new_sun_pos_every_reset=False,
                  new_errors_every_reset=True,
                  use_error_mask=False, 
-                 error_mask_ratio=0.2
+                 error_mask_ratio=0.2,
+                 error_mask_type = 'combine',
+                 error_mask_combine_weight = 0.01,
                 ):
         super(HelioEnv, self).__init__()
 
@@ -149,6 +155,8 @@ class HelioEnv(gym.Env):
         # error computation parameters 
         self.use_error_mask = use_error_mask
         self.error_mask_ratio = error_mask_ratio
+        self.error_mask_type = error_mask_type
+        self.error_mask_combine_weight = error_mask_combine_weight
 
 
         # precompute distance maps
@@ -201,36 +209,23 @@ class HelioEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
 
+        #TODO find an alternative way to deal with this 
         img = self.noisy_field.render(self.sun_pos, action)
+        img_mx = self.noisy_field.render(self.sun_pos, action).clamp_min(1e-6).detach() 
 
         # Compute auxiliary input
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
 
         # Compute losses
-        mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
         target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
+        #mx = target.amax((1,2), keepdim=True).clamp_min(1e-6) #make sure to use the target image for calculating mx
+        mx = img_mx.amax((1,2), keepdim=True).clamp_min(1e-6) #altho this seems to give better results, so maybe we could keep this 
 
         pred_n = img / mx
         targ_n = target / mx
 
-        err = (pred_n - targ_n).abs()
-        avg_error_per_heatmap = err.mean(dim=[-2, -1])
-
-        # create a mask for worst 20% of the heatmaps 
-        cutoff = torch.quantile(avg_error_per_heatmap, 1 - self.error_mask_ratio)
-        error_mask = (avg_error_per_heatmap > cutoff).float()
-        error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
-
-        if self.use_error_mask:
-
-            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6)
-            dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
-
-        else:
-
-            mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
-            dist_l = (err * self.distance_maps).sum((1,2)).mean()
+        err = (pred_n - targ_n).abs().clamp_min(1e-6)
 
         # Boundary error
         normals = action.view(self.batch_size, -1, 3)
@@ -244,8 +239,90 @@ class HelioEnv(gym.Env):
                         self.targ_area, 
                         u, v)
 
+        # create error mask
+        if self.error_mask_type == 'absolute':
+            avg_error_per_heatmap = err.mean(dim=[-2, -1])
+        elif self.error_mask_type == 'spill':
+            avg_error_per_heatmap = boundary(normals, 
+                        self.heliostat_pos, 
+                        self.targ_pos, 
+                        self.targ_norm, 
+                        self.targ_area, 
+                        u, v, return_mean=False).mean(dim=[-2, -1])
+        elif self.error_mask_type == 'combine':
+            avg_error_per_heatmap = boundary(normals, 
+                        self.heliostat_pos, 
+                        self.targ_pos, 
+                        self.targ_norm, 
+                        self.targ_area, 
+                        u, v, return_mean=False, 
+                        border_tolerance=0.5).mean(dim=-1) * (1 - self.error_mask_combine_weight ) + err.mean(dim=[-2, -1]) * self.error_mask_combine_weight 
+
+        # create a mask for worst 20% of the heatmaps 
+        cutoff = torch.quantile(avg_error_per_heatmap, 1 - self.error_mask_ratio)
+        error_mask = (avg_error_per_heatmap >= cutoff).float()
+        error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
+
+        scale_up_ratio = (error_mask.numel()/torch.count_nonzero(error_mask)).clamp_min(1e-6)
+
+        if self.use_error_mask:
+            #apply mask and scale for non-zero elements 
+            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6) * scale_up_ratio
+            dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean() * scale_up_ratio
+            
+            '''
+            bound = (boundary(normals, 
+                        self.heliostat_pos, 
+                        self.targ_pos, 
+                        self.targ_norm, 
+                        self.targ_area, 
+                        u, v, return_mean=False,).mean(dim=-1).unsqueeze(-1).unsqueeze(-1) * error_mask).mean() * scale_up_ratio 
+                        #this line can possible be changed to remove unnecessary unsqueeze but we'll try that later 
+            '''
+
+        else:
+
+            mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
+            dist_l = (err * self.distance_maps).sum((1,2)).mean()
+
         #assert no nan in metrics
-        assert not torch.isnan(mse).any(), "MSE is NaN"
+        #___________________MSE_____________________________________
+        def _nan_diagnosis_mse() -> str:
+            """Build a message string only when the assert fires."""
+            parts = []
+
+            # ── 1. What made MSE blow up? ──────────────────────────────────────────────
+            if torch.isnan(pred_n).any():
+                # check the tensors that feed `pred_n`
+                culprits = [
+                    name for name, t in (("img", img), ("mx", mx)) if torch.isnan(t).any()
+                ]
+                parts.append(
+                    "pred_n (source: " + (", ".join(culprits) if culprits else "unknown") + ")"
+                )
+
+            if torch.isnan(targ_n).any():
+                # check the tensors that feed `targ_n`
+                culprits = [
+                    name for name, t in (("target", target), ("mx", mx)) if torch.isnan(t).any()
+                ]
+                parts.append(
+                    "targ_n (source: " + (", ".join(culprits) if culprits else "unknown") + ")"
+                )
+
+            if torch.isnan(error_mask).any():
+                parts.append("error_mask")
+
+            return (
+                "MSE is NaN – NaNs detected in: " + ", ".join(parts)
+                if parts
+                else "MSE is NaN but no NaNs in pred_n, targ_n, or error_mask (investigate upstream)"
+            )
+
+        assert not torch.isnan(mse).item(), (lambda: _nan_diagnosis_mse())()
+
+        #_________________OTHERS_____________________________________
+
         assert not torch.isnan(dist_l).any(), "Distance loss is NaN"
         assert not torch.isnan(bound).any(), "Boundary loss is NaN"
         #assert no inf in metrics   

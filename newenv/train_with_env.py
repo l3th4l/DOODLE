@@ -328,6 +328,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             new_errors_every_reset=args.new_errors_every_reset,
             use_error_mask=args.use_error_mask, 
             error_mask_ratio=args.error_mask_ratio,
+            error_mask_type=args.error_mask_type, 
+            error_mask_combine_weight=args.error_mask_combine_weight
         )
         train_env.seed(args.seed + i)
         train_envs_list.append(train_env)
@@ -569,6 +571,10 @@ if __name__=="__main__":
                    help="Whether to use only bottom k'th percentile for loss calculation")
     p.add_argument("--error_mask_ratio", type=float, default=0.2,
                    help="Percentile to use for loss calculation (if using error mask)")
+    p.add_argument("--error_mask_type", type=str, default='combine',
+                   help="Type of error to use for calculating error mask: absolute, spill, combine")
+    p.add_argument("--error_mask_combine_weight", type=float, default=0.001,
+                   help="Weight of the absolute errror term over the spillage error term for the mask (only for error_mask_type = combine)")
     args = p.parse_args()
     
     torch.manual_seed(args.seed)
