@@ -210,9 +210,10 @@ class HelioEnv(gym.Env):
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
         target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
+        tx = target.amax((1,2), keepdim=True).clamp_min(1e-6)
 
         pred_n = img / mx
-        targ_n = target / mx
+        targ_n = target / tx
 
         err = (pred_n - targ_n).abs()
         avg_error_per_heatmap = err.mean(dim=[-2, -1])
@@ -223,8 +224,7 @@ class HelioEnv(gym.Env):
         error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
 
         if self.use_error_mask:
-
-            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6)
+            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask))#.clamp_min(1e-6)
             dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
 
         else:

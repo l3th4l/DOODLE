@@ -15,12 +15,25 @@ def ray_plane_intersection_batch(
     ray_dirs: torch.Tensor,
     plane_point: torch.Tensor,
     plane_normal: torch.Tensor,
+    epsilon = 1e-9
 ) -> torch.Tensor:
     """Calculates intersection points of multiple rays with a single plane."""
     n_unit = plane_normal / plane_normal.norm().clamp_min(1e-9)
+
     denom = (ray_dirs * n_unit).sum(dim=1, keepdim=True)
-    t = ((plane_point - ray_origins) * n_unit).sum(dim=1, keepdim=True) / denom
-    return ray_origins + t * ray_dirs
+    valid_mask = denom.abs() > epsilon 
+
+    safe_denom = torch.where(valid_mask, denom, torch.zeros_like(denom) + epsilon)
+
+    t = ((plane_point - ray_origins) * n_unit).sum(dim=1, keepdim=True) / safe_denom
+
+    safe_t = torch.where(valid_mask, t, torch.zeros_like(t))
+    
+    intersections = ray_origins + safe_t * ray_dirs
+
+    safe_intersections = torch.where(valid_mask, intersections, torch.zeros_like(intersections))
+
+    return safe_intersections, valid_mask.float()
 
 
 def rotate_normals_batch(normals: torch.Tensor, error_angles_mrad: torch.Tensor) -> torch.Tensor:
@@ -62,6 +75,7 @@ def gaussian_blur_batch(
     height: float,
     resolution: int,
     sigma_scale: float,
+    valid_mask: torch.Tensor, 
 ) -> torch.Tensor:
     """Computes Gaussian kernels on the target plane for each intersection.
 
@@ -84,9 +98,13 @@ def gaussian_blur_batch(
         + grid_y.view(1, resolution, resolution, 1) * plane_v.view(1, 1, 1, 3)
     )
 
+    # mask out invalid elements 
+    diffs_mask = valid_mask.unsqueeze(1).unsqueeze(1)
     diffs = pts - intersections.view(M, 1, 1, 3)
+    diffs =  diffs * diffs_mask
+
     dist_sq = diffs.pow(2).sum(dim=3)
-    two_sigma_sq = 2 * sigma.pow(2)
+    two_sigma_sq = (2 * sigma.pow(2)).clamp_min(1e-12)
 
     gauss = torch.exp(-dist_sq / two_sigma_sq)
     return gauss
@@ -298,7 +316,7 @@ class HelioField:
         refl_flat = reflect_vectors(inc_flat, actual.reshape(-1, 3))
         orig_flat = helios.reshape(-1, 3)
 
-        inter_flat = ray_plane_intersection_batch(
+        inter_flat, valid_mask = ray_plane_intersection_batch(
             orig_flat, refl_flat, self.target_position, self.target_normal
         )
 
@@ -312,6 +330,7 @@ class HelioField:
             self.target_height,
             self.resolution,
             self.sigma_scale,
+            valid_mask
         )
 
         res = self.resolution
