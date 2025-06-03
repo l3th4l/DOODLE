@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from test_environment import HelioEnv  # your multi-error env
 
 
-torch.autograd.set_detect_anomaly(True)  
+torch.autograd.set_detect_anomaly(False)  
 # ---------------------------------------------------------------------------
 # anomaly loggers
 def log_if_nan(tensor, name):
@@ -413,7 +413,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                 loss  = (mse_f * parts['mse']*(1-decay+1e-5)
                         + dist_f*parts['dist']*decay
                         + anti_spill*parts['bound'])
-
+            
             loss.backward()
 
             # if loss is NaN, print current lr

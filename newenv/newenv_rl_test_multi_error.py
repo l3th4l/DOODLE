@@ -1,6 +1,8 @@
 import torch
 import math
 
+import warnings
+
 # --- Vectorized Helper Functions ------------------------------------------------
 
 def reflect_vectors(incidents: torch.Tensor, normals: torch.Tensor) -> torch.Tensor:
@@ -15,12 +17,45 @@ def ray_plane_intersection_batch(
     ray_dirs: torch.Tensor,
     plane_point: torch.Tensor,
     plane_normal: torch.Tensor,
+    epsilon = 0.0
 ) -> torch.Tensor:
     """Calculates intersection points of multiple rays with a single plane."""
     n_unit = plane_normal / plane_normal.norm().clamp_min(1e-9)
+
     denom = (ray_dirs * n_unit).sum(dim=1, keepdim=True)
-    t = ((plane_point - ray_origins) * n_unit).sum(dim=1, keepdim=True) / denom
-    return ray_origins + t * ray_dirs
+
+    #denom = torch.nan_to_num(denom)
+    valid = denom.abs() > epsilon 
+
+    safe_denom = torch.where(valid, denom, torch.ones_like(denom))
+
+    t = ((plane_point - ray_origins) * n_unit).sum(dim=1, keepdim=True) / safe_denom
+
+    #t = torch.nan_to_num(t)#tempfix
+
+    ray_projections = torch.nan_to_num(t * ray_dirs)
+
+    intersections = ray_origins + ray_projections
+    #intersections = torch.nan_to_num(intersections)#tempfix
+
+    #assert not torch.isnan(ray_origins + t * ray_dirs).any(), "Ray plane intersections has nans"
+    if torch.isnan(ray_origins + t * ray_dirs).any(): 
+        warnings.warn("Ray plane intersections has nans..")
+        if torch.isinf(t).any():
+            warnings.warn("Possible cause might be t being inf..")
+            if (denom == 0).any():
+                warnings.warn("Possible cause might be elements of denom being 0..")
+            if torch.isinf(((plane_point - ray_origins) * n_unit).sum(dim=1, keepdim=True)).any():
+                warnings.warn("Possible cause might be elements of numerator of t being inf..")
+        if torch.isnan(t).any():
+            warnings.warn("Possible cause might be t being nan..")
+        
+
+    assert not torch.isinf(ray_origins + ray_projections).any(), "Ray plane intersections has infs"
+    #if torch.isinf(ray_origins + t * ray_dirs).any():
+    #    warnings.warn("Ray plane intersections has infs..")
+
+    return intersections, valid.float()
 
 
 def rotate_normals_batch(normals: torch.Tensor, error_angles_mrad: torch.Tensor) -> torch.Tensor:
@@ -62,6 +97,7 @@ def gaussian_blur_batch(
     height: float,
     resolution: int,
     sigma_scale: float,
+    valid_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Computes Gaussian kernels on the target plane for each intersection.
 
@@ -70,8 +106,11 @@ def gaussian_blur_batch(
     M = intersections.shape[0]
     device = intersections.device
 
-    distances = (intersections - heliostat_positions).norm(dim=1)
-    sigma = (sigma_scale * distances).clamp_min(1e-9).view(M, 1, 1)
+    distances = (intersections - heliostat_positions).norm(dim=1).clamp_min(1e-5)
+    sigma = (sigma_scale * distances).clamp_min(1e-9).view(M, 1, 1).clamp_min(1e-5) 
+
+    #sigma = torch.nan_to_num(sigma, nan=1e-5, posinf=1e-5, neginf=1e-5)#tempfix
+    #intersections = torch.nan_to_num(intersections)#tempfix
 
     xs = torch.linspace(-width / 2, width / 2, resolution, device=device)
     ys = torch.linspace(-height / 2, height / 2, resolution, device=device)
@@ -84,11 +123,30 @@ def gaussian_blur_batch(
         + grid_y.view(1, resolution, resolution, 1) * plane_v.view(1, 1, 1, 3)
     )
 
+    diffs_mask = valid_mask.unsqueeze(1).unsqueeze(1)
     diffs = pts - intersections.view(M, 1, 1, 3)
+    #mask diffs to not include the very far away intersections 
+    diffs =  diffs * diffs_mask
+
+    assert not torch.isnan(diffs).any(), "diffs has nan"
+    assert not torch.isinf(diffs).any(), "diffs has nan"
+
+    #diffs = torch.nan_to_num(diffs, nan=1e-9, posinf=1e-9, neginf=1e-9)
+    
     dist_sq = diffs.pow(2).sum(dim=3)
-    two_sigma_sq = 2 * sigma.pow(2)
+    two_sigma_sq = (2 * sigma.pow(2)).clamp_min(1e-9) #tempfix
+
+    #two_sigma_sq = torch.nan_to_num(two_sigma_sq, nan=1e-5, posinf=1e-5, neginf=1e-5) #tempfix
+    #dist_sq = torch.nan_to_num(dist_sq, nan=1e-5, posinf=1e-5, neginf=1e-5) #tempfix
 
     gauss = torch.exp(-dist_sq / two_sigma_sq)
+    
+    #try a hacky method for dealing with nans and infs (replace later)
+    #gauss = torch.nan_to_num(gauss, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if torch.isnan(gauss).any(): 
+        warnings.warn("NaNs in gaussian output") 
+
     return gauss
 
 
@@ -298,7 +356,7 @@ class HelioField:
         refl_flat = reflect_vectors(inc_flat, actual.reshape(-1, 3))
         orig_flat = helios.reshape(-1, 3)
 
-        inter_flat = ray_plane_intersection_batch(
+        inter_flat, valid_mask = ray_plane_intersection_batch(
             orig_flat, refl_flat, self.target_position, self.target_normal
         )
 
@@ -312,14 +370,21 @@ class HelioField:
             self.target_height,
             self.resolution,
             self.sigma_scale,
+            valid_mask
         )
 
         res = self.resolution
         gauss = gauss_flat.view(B, self.num_heliostats, res, res)
         images = gauss.sum(dim=1)
+        #images = torch.nan_to_num(images, nan=1e-5, posinf=1e-5, neginf=1e-5) #tempfix
+
 
         # ---- Normalise total energy ------------------------------------------
-        sums = images.view(B, -1).sum(dim=1).view(B, 1, 1).clamp_min(1e-9)
+        sums = images.view(B, -1).sum(dim=1).view(B, 1, 1).clamp_min(1e-9) #tempfix
         images = images / sums
+
+        #assert not torch.isnan(images).any(), "images has NaN"
+        if torch.isnan(images).any():
+            warnings.warn("images has NaN values...")
 
         return images[0] if not batched else images

@@ -208,23 +208,27 @@ class HelioEnv(gym.Env):
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
 
         # Compute losses
-        mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
+        mx = img.amax((1,2), keepdim=True).clamp_min(1e-9)
         target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
 
-        pred_n = img / mx
-        targ_n = target / mx
+        # NOTE experimentally, setting nans for mx and pred_n to 0 
+        #mx = torch.nan_to_num(mx, nan=1e-6, posinf=1e-6, neginf=1e-6) #tempfix 
+        #img = torch.nan_to_num(img, nan=1e-6, posinf=1e-6, neginf=1e-6) #tempfix
+
+        pred_n = img / mx.detach()
+        targ_n = target / mx.detach()
 
         err = (pred_n - targ_n).abs()
         avg_error_per_heatmap = err.mean(dim=[-2, -1])
 
         # create a mask for worst 20% of the heatmaps 
         cutoff = torch.quantile(avg_error_per_heatmap, 1 - self.error_mask_ratio)
-        error_mask = (avg_error_per_heatmap > cutoff).float()
+        error_mask = (avg_error_per_heatmap >= cutoff).float()
         error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
 
         if self.use_error_mask:
 
-            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask)).clamp_min(1e-6)
+            mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask))#.clamp_min(1e-6)
             dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
 
         else:
