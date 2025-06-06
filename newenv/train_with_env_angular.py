@@ -244,7 +244,7 @@ class PolicyNet(nn.Module):
         # concatenate aux features and predict
         x = torch.cat([feat, aux], dim=1)      # (B, feat_dim+aux_dim)
         angles = self.head(x)                 # (B, num_h*3)
-        angles = angles.view(B, self.num_h, 3)
+        angles = angles.view(B, self.num_h, 3) * 50
 
         # TODO Replace with tanh and adjust for the range of angles +- deviations
         
