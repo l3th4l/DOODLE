@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from test_environment import HelioEnv  # your multi-error env
 
 
-torch.autograd.set_detect_anomaly(True)  
+torch.autograd.set_detect_anomaly(False)  
 # ---------------------------------------------------------------------------
 # anomaly loggers
 def log_if_nan(tensor, name):
@@ -244,6 +244,17 @@ class PolicyNet(nn.Module):
         x = torch.cat([feat, aux], dim=1)      # (B, feat_dim+aux_dim)
         normals = self.head(x)                 # (B, num_h*3)
         normals = normals.view(B, self.num_h, 3)
+
+        # NOTE (new-test feature) ensure z > 0 but keep x,y unchanged
+
+        # method 1. out-of-place: returns a fresh tensor, no inplace write
+        #neg_mask = normals[..., 2] < 0                     # (B, H) bool
+        #normals = torch.where(neg_mask.unsqueeze(-1), -normals, normals)
+
+        # method 2. build a NEW tensor for z, then concatenate – no inplace writes
+        z_pos = normals[..., 2].abs()                      # (B, H)
+        normals = torch.cat([normals[..., :2], z_pos.unsqueeze(-1)], dim=-1)
+
         normals = F.normalize(normals, dim=2)
 
         return normals, hx
