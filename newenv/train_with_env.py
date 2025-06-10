@@ -252,8 +252,8 @@ class PolicyNet(nn.Module):
         #normals = torch.where(neg_mask.unsqueeze(-1), -normals, normals)
 
         # method 2. build a NEW tensor for z, then concatenate – no inplace writes
-        z_pos = normals[..., 2].abs()                      # (B, H)
-        normals = torch.cat([normals[..., :2], z_pos.unsqueeze(-1)], dim=-1)
+        #z_pos = normals[..., 2].abs()                      # (B, H)
+        #normals = torch.cat([normals[..., :2], z_pos.unsqueeze(-1)], dim=-1)
 
         normals = F.normalize(normals, dim=2)
 
