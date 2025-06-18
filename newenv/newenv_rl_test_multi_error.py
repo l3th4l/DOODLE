@@ -9,7 +9,6 @@ def reflect_vectors(incidents: torch.Tensor, normals: torch.Tensor) -> torch.Ten
     dots = (incidents * normals_unit).sum(dim=1, keepdim=True)
     return incidents - 2 * dots * normals_unit
 
-
 def ray_plane_intersection_batch(
     ray_origins: torch.Tensor,
     ray_dirs: torch.Tensor,
@@ -224,7 +223,7 @@ class HelioField:
 
             inc_dir = incidents / incidents.norm(dim=1, keepdim=True).clamp_min(1e-9)
             ref_dir = reflected / reflected.norm(dim=1, keepdim=True).clamp_min(1e-9)
-            normals = -(inc_dir + ref_dir)
+            normals = (inc_dir + ref_dir)
             return normals / normals.norm(dim=1, keepdim=True).clamp_min(1e-9)
 
         # batched input ----------------------------------------------------
@@ -235,8 +234,19 @@ class HelioField:
 
         inc_dir = incidents / incidents.norm(dim=2, keepdim=True).clamp_min(1e-9)
         ref_dir = reflected / reflected.norm(dim=2, keepdim=True).clamp_min(1e-9)
-        normals = -(inc_dir + ref_dir)
+        normals = (inc_dir + ref_dir)
         return normals / normals.norm(dim=2, keepdim=True).clamp_min(1e-9)
+
+    def apply_error_to_normals(self, normals, errors):
+
+        flats = normals.reshape(-1, 3)
+        errs_flat = errors.reshape(-1, 2)
+
+        actual = rotate_normals_batch(flats, errs_flat)
+        actual = actual / actual.norm(dim=1, keepdim=True).clamp_min(1e-9)
+        actual = actual.view(B, self.num_heliostats, 3)
+
+        return actual
 
     def init_actions(self, sun_position: torch.Tensor) -> None:
         """Generate noisy initial mirror orientations for optimisation / RL."""
@@ -260,6 +270,7 @@ class HelioField:
         sun_position: torch.Tensor,
         action: torch.Tensor,
         show_spillage: bool = False,  # kept for API completeness (unused)
+        monitor: bool = False,
     ) -> torch.Tensor:
         """Return irradiance image(s) on the target plane.
 
@@ -313,11 +324,15 @@ class HelioField:
         incidents = sun.view(B, 1, 3) - helios
 
         inc_flat = incidents.reshape(-1, 3)
-        refl_flat = reflect_vectors(inc_flat, actual.reshape(-1, 3))
+        inc_flat_normed = inc_flat/ inc_flat.norm(dim=-1).unsqueeze(1).clamp_min(1e-9)
+
+        refl_flat = reflect_vectors(inc_flat_normed, actual.reshape(-1, 3))
+        refl_flat_normed = refl_flat / refl_flat.norm(dim=-1).unsqueeze(1).clamp_min(1e-9)
+
         orig_flat = helios.reshape(-1, 3)
 
         inter_flat, valid_mask = ray_plane_intersection_batch(
-            orig_flat, refl_flat, self.target_position, self.target_normal
+            orig_flat, refl_flat_normed, self.target_position, self.target_normal
         )
 
         gauss_flat = gaussian_blur_batch(
@@ -339,6 +354,9 @@ class HelioField:
 
         # ---- Normalise total energy ------------------------------------------
         sums = images.view(B, -1).sum(dim=1).view(B, 1, 1).clamp_min(1e-9)
-        images = images / sums
+        images = images #/ sums
 
-        return images[0] if not batched else images
+        if not monitor:
+            return (images[0], actual) if not batched else (images, actual)
+        else: 
+            return (images[0], actual, refl_flat_normed) if not batched else (images, actual, refl_flat_normed)
