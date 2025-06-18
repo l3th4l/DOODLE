@@ -296,7 +296,9 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     last_mse_loss = None
     best_mse_loss = None
 
+    # try with best alignment loss for the iterations when we do use the alignment loss 
     last_alignment_loss = np.inf
+    best_alignment_loss = np.inf
 
     for step in range(args.steps + pretrain_steps):
         # get batch of envs
@@ -312,12 +314,20 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             # save the boundary loss for later
             last_boundary_loss = parts['bound'].item()
 
-            if (args.num_batches * step + i < (pretrain_steps)) or parts['alignment_loss'] > last_alignment_loss:
+            #if (args.num_batches * step + i < (pretrain_steps)) or parts['alignment_loss'] > last_alignment_loss:
+            if ((args.num_batches * step + i < (pretrain_steps)) 
+                or ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) and (parts['alignment_loss'] > best_alignment_loss))
+                or (parts['alignment_loss'] > last_alignment_loss)):
+
                 loss = alignment_f * parts['alignment_loss']
                 if args.num_batches * step + i == (pretrain_steps -1):
                     last_alignment_loss = parts['alignment_loss']
+                if parts['alignment_loss'] < best_alignment_loss:
+                    best_alignment_loss = parts['alignment_loss']
 
-            elif (args.num_batches * step + i < (warmup_steps + pretrain_steps)) or (last_boundary_loss > args.boundary_thresh):
+            elif ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) 
+                or (last_boundary_loss > args.boundary_thresh)):
+                
                 # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
