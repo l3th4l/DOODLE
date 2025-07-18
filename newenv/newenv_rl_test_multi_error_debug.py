@@ -131,9 +131,14 @@ class HelioField:
         resolution: int = 100,
         device: torch.device | str = "cpu",
         max_batch_size: int = 25,
+        num_suns: int = 25,
+        num_errors: int = 20,
     ) -> None:
         self.device = torch.device(device)
         self.max_batch_size = int(max_batch_size)
+
+        self.num_suns = num_suns
+        self.num_errors = num_errors
 
         # Scene geometry -------------------------------------------------------
         self.heliostat_positions = torch.as_tensor(
@@ -195,6 +200,11 @@ class HelioField:
         # Batched error tensor (re‑used until next reset)
         if self.max_batch_size >= 1:
             self.batch_error_angles_mrad = self._sample_error_angles(self.max_batch_size)
+            self.batch_error_angles_mrad = torch.repeat_interleave( 
+                                                                    self.batch_error_angles_mrad, 
+                                                                    repeats = self.max_batch_size, 
+                                                                    dim = 0,
+                                                                  )
         else:
             self.batch_error_angles_mrad = None
 

@@ -1,6 +1,6 @@
 #A gymnasium-like environment for the heliostat field
 
-from newenv_rl_test_multi_error import HelioField   # the multi-error env
+from newenv_rl_test_multi_error_debug import HelioField, ray_plane_intersection_batch   # the multi-error env
 from scipy.ndimage import distance_transform_edt
 
 import numpy as np
@@ -24,6 +24,43 @@ def make_distance_maps(imgs, thr=0.5):
     return torch.tensor(np.stack(maps), dtype=torch.float32, device=imgs.device)
 
 # boundary loss function
+#NOTE: the boundary is now 75% of what it was before
+'''
+def boundary(vects, 
+            heliostat_pos, 
+            targ_pos, 
+            targ_norm, 
+            targ_area, 
+            target_east_axis,
+            target_up_axis,
+            return_all = False, 
+            ):
+    u = target_east_axis #torch.tensor([1.,0.,0.], device=device)
+    v = target_up_axis #torch.tensor([0.,0.,1.], device=device)
+
+    border_tolerance = 0.75
+
+    inv_vects = -vects
+
+    dots = torch.einsum('bij,j->bi', -vects, targ_norm)
+    eps = 1e-6
+    valid = (dots.abs() > eps)
+    t = torch.einsum('j,bij->bi', targ_pos, inv_vects)/(dots+(~valid).float()*eps)
+    inter = heliostat_pos.unsqueeze(0) + inv_vects*t.unsqueeze(2)
+    local = inter - targ_pos
+    xl = torch.einsum('bij,j->bi', local, u)
+    yl = torch.einsum('bij,j->bi', local, v)
+
+    hw, hh = (targ_area[0] * border_tolerance)/2, (targ_area[1]*border_tolerance)/2
+    dx = F.relu(xl.abs()-hw*border_tolerance); dy = F.relu(yl.abs()-hh*border_tolerance)
+    dist = torch.sqrt(dx*dx+dy*dy+1e-8)
+    inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
+    if not return_all:
+        return (dist*(~inside).float()).mean()
+    else:
+        return (dist*(~inside).float())
+'''
+
 def boundary(vects, 
             heliostat_pos, 
             targ_pos, 
@@ -34,8 +71,6 @@ def boundary(vects,
             return_all = False, 
             ):
 
-    #TODO : confirm that this line also works well with more than one heliostat per simulation 
-    # I think it does not, so we need to check the dimensions later 
     intersections, valid_float_mask = ray_plane_intersection_batch(
                                                 heliostat_pos.view([-1, 3]), 
                                                 vects.view([-1, 3]), 
@@ -58,14 +93,8 @@ def boundary(vects,
     if not return_all:
         return (dist*(~inside).float()).mean()
     else:
-        #NOTE since we're using this for visualization, we can add a clamp to this. Alternatively,
-        #we can use the log of this for vizualization purpouses, however from a risk optimization
-        #perspective, that does not make a lot of sense because higher boundary loss means more risk 
-        #and we want to decrease higher risk more rapidly.
-        return (dist*(~inside).float()).view([-1,]).clamp_max(20) 
+        return (dist*(~inside).float()).view([-1,]).clamp_max(20)
 
-
-#Alignment loss 
 def calculate_angles_mrad(
         v1: torch.Tensor,
         v2: torch.Tensor,
@@ -187,6 +216,8 @@ class HelioEnv(gym.Env):
 
         # precompute distance maps
         sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device),dim=1)
+        sun_dirs = sun_dirs.repeat(self.batch_size, 1)
+
         #make sure sun is always in the upper hemisphere (U coordinate is always positive)
         sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
         radius   = math.hypot(1000,1000)
@@ -274,10 +305,14 @@ class HelioEnv(gym.Env):
 
         # create a mask for the worst 10% of the alignment loss 
         alignment_errors = calculate_angles_mrad(ideal_normals, actual_normals)
-        alignment_mask = (avg_error_per_heatmap > cutoff).float()
+        alignment_cutoff = torch.quantile(alignment_errors, 1 - self.error_mask_ratio)
 
+        alignment_mask = (alignment_errors > alignment_cutoff).float()
+    
         alignment_loss = torch.mean(calculate_angles_mrad(ideal_normals, actual_normals))
         masked_alignment_loss = torch.mean(alignment_errors * alignment_mask)
+
+        all_alignment_loss = calculate_angles_mrad(ideal_normals, actual_normals)
 
         if self.use_error_mask:
             mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask))#.clamp_min(1e-6)
@@ -337,7 +372,7 @@ class HelioEnv(gym.Env):
                     'alignment_loss' : alignment_loss, 
                     'masked_alignment_loss': masked_alignment_loss, 
                     }
-                    
+
         obs = {'img': img, 'aux': aux}
 
         monitor =   {
@@ -346,6 +381,7 @@ class HelioEnv(gym.Env):
                     'ideal_normals': ideal_normals.view([-1, 3]), 
                     'all_bounds': all_bounds, 
                     'mae_image': mean_absolute_error,
+                    'all_alignment_loss' : all_alignment_loss.view([-1,])
                     }
 
         return obs, metrics, monitor

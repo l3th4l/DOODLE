@@ -165,7 +165,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
     hist[:, -1] = img.clone()
 
     #mean loss dict
-    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0, 'alignment_loss': 0,}
+    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0, 'alignment_loss': 0, 'masked_alignment_loss':0, }
     mse_over_t = []
 
     hx = None
@@ -182,6 +182,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
             mean_loss_dict['dist'] = mean_loss_dict['dist'] + (1/T) * loss_dict['dist']
             mean_loss_dict['bound'] = mean_loss_dict['bound'] + (1/T) * loss_dict['bound']
             mean_loss_dict['alignment_loss'] = mean_loss_dict['alignment_loss'] + (1/T) * loss_dict['alignment_loss']
+            mean_loss_dict['masked_alignment_loss'] = mean_loss_dict['masked_alignment_loss'] + (1/T) * loss_dict['masked_alignment_loss']
 
         mse_over_t.append(loss_dict['mse'].item())
 

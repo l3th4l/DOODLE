@@ -24,6 +24,7 @@ def make_distance_maps(imgs, thr=0.5):
     return torch.tensor(np.stack(maps), dtype=torch.float32, device=imgs.device)
 
 # boundary loss function
+#NOTE: the boundary is now 75% of what it was before
 def boundary(vects, 
             heliostat_pos, 
             targ_pos, 
@@ -31,59 +32,25 @@ def boundary(vects,
             targ_area, 
             target_east_axis,
             target_up_axis,
-            return_all = False, 
             ):
+    u = target_east_axis #torch.tensor([1.,0.,0.], device=device)
+    v = target_up_axis #torch.tensor([0.,0.,1.], device=device)
 
-    #TODO : confirm that this line also works well with more than one heliostat per simulation 
-    # I think it does not, so we need to check the dimensions later 
-    intersections, valid_float_mask = ray_plane_intersection_batch(
-                                                heliostat_pos.view([-1, 3]), 
-                                                vects.view([-1, 3]), 
-                                                targ_pos, 
-                                                targ_norm 
-                                                ) 
+    border_tolerance = 0.75
 
-    local_points = intersections - targ_pos
-
-    xl = local_points @ target_east_axis
-    yl = local_points @ target_up_axis 
-
-    
-    hw, hh = (targ_area[0] )/2, (targ_area[1])/2
-    dx = F.relu(xl.abs()-hw); dy = F.relu(yl.abs()-hh)
-    
+    dots = torch.einsum('bij,j->bi', vects, targ_norm)
+    eps = 1e-6
+    valid = (dots.abs() > eps)
+    t = torch.einsum('j,bij->bi', targ_pos, vects)/(dots+(~valid).float()*eps)
+    inter = heliostat_pos.unsqueeze(0) + vects*t.unsqueeze(2)
+    local = inter - targ_pos
+    xl = torch.einsum('bij,j->bi', local, u)
+    yl = torch.einsum('bij,j->bi', local, v)
+    hw, hh = targ_area[0]/2, targ_area[1]/2
+    dx = F.relu(xl.abs()-hw*border_tolerance); dy = F.relu(yl.abs()-hh*border_tolerance)
     dist = torch.sqrt(dx*dx+dy*dy+1e-8)
-    inside = (xl.abs()<=hw)&(yl.abs()<=hh)#&(valid_float_mask > 0)
-
-    if not return_all:
-        return (dist*(~inside).float()).mean()
-    else:
-        #NOTE since we're using this for visualization, we can add a clamp to this. Alternatively,
-        #we can use the log of this for vizualization purpouses, however from a risk optimization
-        #perspective, that does not make a lot of sense because higher boundary loss means more risk 
-        #and we want to decrease higher risk more rapidly.
-        return (dist*(~inside).float()).view([-1,]).clamp_max(20) 
-
-
-#Alignment loss 
-def calculate_angles_mrad(
-        v1: torch.Tensor,
-        v2: torch.Tensor,
-        epsilon: float = 1e-8
-) -> torch.Tensor:
-    # in case v1 or v2 have shape (4,), bring to (1, 4)
-    v1 = v1.unsqueeze(0) if v1.dim() == 1 else v1
-    v2 = v2.unsqueeze(0) if v2.dim() == 1 else v2
-
-    m1 = torch.norm(v1, dim=-1)
-    m2 = torch.norm(v2, dim=-1)
-    dot_products = torch.sum(v1 * v2, dim=-1)
-    cos_angles = dot_products / (m1 * m2 + epsilon)
-    angles_rad = torch.acos(
-        torch.clamp(cos_angles, min= -1.0 + 1e-7, max= 1.0 - 1e-7)
-    )
-    return angles_rad * 1000
-
+    inside = (xl.abs()<=hw)&(yl.abs()<=hh)&valid
+    return (dist*(~inside).float()).mean()
 
 class HelioEnv(gym.Env):
 
@@ -101,8 +68,7 @@ class HelioEnv(gym.Env):
                  new_sun_pos_every_reset=False,
                  new_errors_every_reset=True,
                  use_error_mask=False, 
-                 error_mask_ratio=0.2,
-                 exponential_risk=False, 
+                 error_mask_ratio=0.2
                 ):
         super(HelioEnv, self).__init__()
 
@@ -194,14 +160,8 @@ class HelioEnv(gym.Env):
 
         self.ref_field.init_actions(self.sun_pos)
         with torch.no_grad():
-            timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
+            timg = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
         self.distance_maps = make_distance_maps(timg)
-
-        self.ref_min = torch.min(timg)
-        self.ref_max = torch.max(timg)
-
-        #exponential risk 
-        self.exponential_risk = exponential_risk
 
     def reset(self):
         """
@@ -213,7 +173,7 @@ class HelioEnv(gym.Env):
             self._sample_sun_pos()
             self.ref_field.init_actions(self.sun_pos)
             with torch.no_grad():
-                timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
+                timg = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
             self.distance_maps = make_distance_maps(timg, device=self.device)
 
         if self.new_errors_every_reset:
@@ -222,7 +182,7 @@ class HelioEnv(gym.Env):
         with torch.no_grad():
             self.noisy_field.init_actions(self.sun_pos)
             init_action = self.noisy_field.initial_action
-            img, _ = self.noisy_field.render(self.sun_pos, init_action)
+            img = self.noisy_field.render(self.sun_pos, init_action)
 
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
@@ -241,11 +201,7 @@ class HelioEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
 
-        img, actual_normals, reflected_rays = self.noisy_field.render(
-                                    self.sun_pos, 
-                                    action, 
-                                    monitor=True,
-                                    )
+        img = self.noisy_field.render(self.sun_pos, action)
 
         # Compute auxiliary input
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
@@ -253,15 +209,10 @@ class HelioEnv(gym.Env):
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
-        target, _ = self.ref_field.render(
-                                        self.sun_pos, 
-                                        ideal_normals.flatten(1), 
-                                        monitor=False
-                                        )
-        target = target.detach()                                            
+        target = self.ref_field.render(self.sun_pos, ideal_normals.flatten(1)).detach()
         tx = target.amax((1,2), keepdim=True).clamp_min(1e-6)
 
-        pred_n = img / tx
+        pred_n = img / mx
         targ_n = target / tx
 
         err = (pred_n - targ_n).abs()
@@ -272,19 +223,13 @@ class HelioEnv(gym.Env):
         error_mask = (avg_error_per_heatmap > cutoff).float()
         error_mask = error_mask.unsqueeze(-1).unsqueeze(-1)
 
-        # create a mask for the worst 10% of the alignment loss 
-        alignment_errors = calculate_angles_mrad(ideal_normals, actual_normals)
-        alignment_mask = (avg_error_per_heatmap > cutoff).float()
-
-        alignment_loss = torch.mean(calculate_angles_mrad(ideal_normals, actual_normals))
-        masked_alignment_loss = torch.mean(alignment_errors * alignment_mask)
-
         if self.use_error_mask:
             mse = (F.mse_loss(pred_n * error_mask, targ_n*error_mask))#.clamp_min(1e-6)
             dist_l = (error_mask*(err * self.distance_maps)).sum((1,2)).mean()
 
         else:
-            mse = (F.mse_loss(pred_n, targ_n))#.clamp_min(1e-6)
+
+            mse = (F.mse_loss(pred_n, targ_n)).clamp_min(1e-6)
             dist_l = (err * self.distance_maps).sum((1,2)).mean()
 
         # Boundary error
@@ -292,33 +237,12 @@ class HelioEnv(gym.Env):
         u = torch.tensor([1., 0., 0.], device=self.device, dtype=torch.float32)
         v = torch.tensor([0., 0., 1.], device=self.device, dtype=torch.float32)
         
-        if not self.exponential_risk:
-            bound = boundary(reflected_rays.view([self.batch_size, -1, 3]), 
-                            self.heliostat_pos, 
-                            self.targ_pos, 
-                            self.targ_norm, 
-                            self.targ_area, 
-                            u, v)
-        else:
-            bound = boundary(reflected_rays.view([self.batch_size, -1, 3]), 
-                            self.heliostat_pos, 
-                            self.targ_pos, 
-                            self.targ_norm, 
-                            self.targ_area, 
-                            u, v, return_all=True)
-
-            bound = torch.exp(bound + 1e-6)
-            bound = torch.mean(bound)
-
-        #monitors 
-        all_bounds = boundary(reflected_rays.view([self.batch_size, -1, 3]), 
+        bound = boundary(normals, 
                         self.heliostat_pos, 
                         self.targ_pos, 
                         self.targ_norm, 
                         self.targ_area, 
-                        u, v, return_all=True)
-
-        mean_absolute_error = err.mean(dim = [-1, -2]).view([-1, 1])
+                        u, v)
 
         #assert no nan in metrics
         assert not torch.isnan(mse).any(), "MSE is NaN"
@@ -330,25 +254,9 @@ class HelioEnv(gym.Env):
         assert not torch.isinf(bound).any(), "Boundary loss is Inf"
 
 
-        metrics =   {
-                    'mse': mse, 
-                    'dist': dist_l, 
-                    'bound': bound, 
-                    'alignment_loss' : alignment_loss, 
-                    'masked_alignment_loss': masked_alignment_loss, 
-                    }
-                    
+        metrics = {'mse': mse, 'dist': dist_l, 'bound': bound}
         obs = {'img': img, 'aux': aux}
-
-        monitor =   {
-                    'normals': normals, 
-                    'reflected_rays' : reflected_rays.view([-1, 3]),
-                    'ideal_normals': ideal_normals.view([-1, 3]), 
-                    'all_bounds': all_bounds, 
-                    'mae_image': mean_absolute_error,
-                    }
-
-        return obs, metrics, monitor
+        return obs, metrics
 
     def seed(self, seed=None):
         """

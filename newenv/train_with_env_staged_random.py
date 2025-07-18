@@ -13,7 +13,7 @@ from scipy.ndimage import distance_transform_edt
 from datetime import datetime
 import matplotlib.pyplot as plt
 
-from test_environment_angular import HelioEnv  # your multi-error env
+from test_environment import HelioEnv  # your multi-error env
 
 
 torch.autograd.set_detect_anomaly(False)  
@@ -198,12 +198,11 @@ class PolicyNet(nn.Module):
         else:
             raise ValueError(f"Unknown architecture '{architecture}'. Choose 'mlp', 'lstm', or 'transformer'.")
 
-        # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*2
+        # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*3
         self.head = nn.Sequential(
             nn.Linear(feat_dim + aux_dim, 256),
             nn.ReLU(),
-            nn.Linear(256, num_heliostats * 2),
-            nn.Tanh(),  # Use tanh to ensure angles are in [-1, 1]
+            nn.Linear(256, num_heliostats * 3)
         )
 
     def forward(self,
@@ -243,12 +242,22 @@ class PolicyNet(nn.Module):
 
         # concatenate aux features and predict
         x = torch.cat([feat, aux], dim=1)      # (B, feat_dim+aux_dim)
-        angles = self.head(x)                 # (B, num_h*3)
-        angles = angles.view(B, self.num_h, 2) * 50
+        normals = self.head(x)                 # (B, num_h*3)
+        normals = normals.view(B, self.num_h, 3)
 
-        # TODO Replace with tanh and adjust for the range of angles +- deviations
-        
-        return angles, hx
+        # NOTE (new-test feature) ensure z > 0 but keep x,y unchanged
+
+        # method 1. out-of-place: returns a fresh tensor, no inplace write
+        #neg_mask = normals[..., 2] < 0                     # (B, H) bool
+        #normals = torch.where(neg_mask.unsqueeze(-1), -normals, normals)
+
+        # method 2. build a NEW tensor for z, then concatenate – no inplace writes
+        #z_pos = normals[..., 2].abs()                      # (B, H)
+        #normals = torch.cat([normals[..., :2], z_pos.unsqueeze(-1)], dim=-1)
+
+        normals = F.normalize(normals, dim=2)
+
+        return normals, hx
 
 #TODO See if ther is a problem with the dimensions of the input image
 #NOTE Apparently not but with k=T, we're not utilizing the power of the LSTM
