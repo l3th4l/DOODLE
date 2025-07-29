@@ -6,8 +6,8 @@ import math
 def reflect_vectors(incidents: torch.Tensor, normals: torch.Tensor) -> torch.Tensor:
     """Reflects a batch of incident vectors about corresponding normals."""
     normals_unit = normals / normals.norm(dim=1, keepdim=True).clamp_min(1e-9)
-    dots = (incidents * normals_unit).sum(dim=1, keepdim=True)
-    return incidents - 2 * dots * normals_unit
+    dots = -(incidents * normals_unit).sum(dim=1, keepdim=True)
+    return -incidents - 2 * dots * normals_unit
 
 def ray_plane_intersection_batch(
     ray_origins: torch.Tensor,

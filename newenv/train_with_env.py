@@ -98,8 +98,10 @@ class PolicyNet(nn.Module):
 
         # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*3
         self.head = nn.Sequential(
+            nn.BatchNorm1d(feat_dim + aux_dim),
             nn.Linear(feat_dim + aux_dim, 256),
             nn.ReLU(),
+            nn.BatchNorm1d(256),
             nn.Linear(256, num_heliostats * 3)
         )
 
@@ -315,9 +317,9 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             last_boundary_loss = parts['bound'].item()
 
             #if (args.num_batches * step + i < (pretrain_steps)) or parts['alignment_loss'] > last_alignment_loss:
-            if ((args.num_batches * step + i < (pretrain_steps)) 
-                or ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) and (parts['alignment_loss'] > best_alignment_loss))
-                or (parts['alignment_loss'] > last_alignment_loss)):
+            if True: #((args.num_batches * step + i < (pretrain_steps)) 
+                #or ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) and (parts['alignment_loss'] > best_alignment_loss))
+                #or (parts['alignment_loss'] > last_alignment_loss)):
 
                 loss = alignment_f * parts['alignment_loss']
                 if args.num_batches * step + i == (pretrain_steps -1):
@@ -509,7 +511,7 @@ if __name__=="__main__":
                    help="Weight of the distance loss term.")
     p.add_argument("--mse_f",     type=float, default=1.0,
                    help="Weight of the distance loss term.")
-    p.add_argument("--alignment_f",     type=float, default=0.0001,
+    p.add_argument("--alignment_f",     type=float, default=100,
                    help="Weight of the alignment loss term. (only during pretraining)")
     p.add_argument("--new_errors_every_reset", type=bool, default=False,
                    help="Whether to resample errors every reset.")
