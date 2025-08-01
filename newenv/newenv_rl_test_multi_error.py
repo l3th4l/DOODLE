@@ -316,6 +316,9 @@ class HelioField:
         errs_flat = errs.reshape(-1, 2)
 
         actual = rotate_normals_batch(flats, errs_flat)
+        #make sure that the values in the up direction are not less than or equal to zero
+        #to do this, we use a sigmoid for the up direction
+        actual[:, -1] = torch.sigmoid(actual[:, -1])
         actual = actual / actual.norm(dim=1, keepdim=True).clamp_min(1e-9)
         actual = actual.view(B, self.num_heliostats, 3)
 
