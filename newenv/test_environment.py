@@ -185,7 +185,8 @@ class HelioEnv(gym.Env):
 
         self.ref_field.init_actions(self.sun_pos)
         with torch.no_grad():
-            timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
+            ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
+            timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action, ideal_normals)
         self.distance_maps = make_distance_maps(timg)
 
         self.ref_min = torch.min(timg)
@@ -204,7 +205,9 @@ class HelioEnv(gym.Env):
             self._sample_sun_pos()
             self.ref_field.init_actions(self.sun_pos)
             with torch.no_grad():
-                timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action)
+                    
+                ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
+                timg, _ = self.ref_field.render(self.sun_pos, self.ref_field.initial_action, ideal_normals)
             self.distance_maps = make_distance_maps(timg, device=self.device)
 
         if self.new_errors_every_reset:
@@ -213,7 +216,8 @@ class HelioEnv(gym.Env):
         with torch.no_grad():
             self.noisy_field.init_actions(self.sun_pos)
             init_action = self.noisy_field.initial_action
-            img, _ = self.noisy_field.render(self.sun_pos, init_action)
+            ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
+            img, _ = self.noisy_field.render(self.sun_pos, init_action, ideal_normals)
 
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
@@ -232,21 +236,25 @@ class HelioEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = torch.tensor(action, dtype=torch.float32, device=self.device)
 
+        ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
+
         img, actual_normals, reflected_rays = self.noisy_field.render(
                                     self.sun_pos, 
                                     action, 
+                                    ideal_normals,
                                     monitor=True,
                                     )
 
         # Compute auxiliary input
-        ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)
+        
         target, _ = self.ref_field.render(
                                         self.sun_pos, 
                                         ideal_normals.flatten(1), 
+                                        ideal_normals,
                                         monitor=False
                                         )
         target = target.detach()                                            

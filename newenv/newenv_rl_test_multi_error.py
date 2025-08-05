@@ -4,6 +4,45 @@ import math
 
 # --- Vectorized Helper Functions ------------------------------------------------
 
+def project_onto_circular_cone(a: torch.Tensor,
+                               b: torch.Tensor,
+                               theta: float,
+                               dim: int = -1,
+                               eps: float = 1e-12) -> torch.Tensor:
+    """
+    Project vector(s) `a` onto the circular cone with axis `b` (apex at origin)
+    and half-angle `theta` (in radians). Supports broadcasting over all dims
+    except `dim` which is the vector axis.
+    """
+    # Unit axis c from b
+    b_norm = torch.linalg.norm(b, dim=dim, keepdim=True).clamp_min(eps)
+    c = b / b_norm
+
+    # Decompose a into parallel/perpendicular to c
+    beta = (a * c).sum(dim=dim, keepdim=True)            # scalar along axis
+    u = a - beta * c                                     # perpendicular part
+    alpha = torch.linalg.norm(u, dim=dim, keepdim=True)  # ||u||
+
+    tau = torch.tan(torch.as_tensor(theta, dtype=a.dtype, device=a.device)).clamp_min(eps)
+    thresh = alpha / tau
+
+    inside = beta >= thresh
+    zero = beta <= -thresh
+    middle = (~inside) & (~zero)
+
+    # Case 1: inside -> keep a
+    out = torch.where(inside, a, torch.zeros_like(a))
+
+    # Case 2: zero -> already set to 0 by where above; only need to fill middle
+    if middle.any():
+        # Safe scaling when alpha>0 (middle implies alpha>0)
+        s = 0.5 * (beta + thresh)                        # scalar coeff for c
+        w_scale = (beta * tau + alpha) / (2.0 * alpha)   # scalar coeff for u
+        mid_val = s * c + w_scale * u
+        out = torch.where(middle, mid_val, out)
+
+    return out
+
 def reflect_vectors(incidents: torch.Tensor, normals: torch.Tensor) -> torch.Tensor:
     """Reflects a batch of incident vectors about corresponding normals."""
     normals_unit = normals / normals.norm(dim=1, keepdim=True).clamp_min(1e-9)
@@ -270,6 +309,7 @@ class HelioField:
         self,
         sun_position: torch.Tensor,
         action: torch.Tensor,
+        ideal_normals: torch.Tensor,
         show_spillage: bool = False,  # kept for API completeness (unused)
         monitor: bool = False,
     ) -> torch.Tensor:
@@ -317,6 +357,13 @@ class HelioField:
         errs_flat = errs.reshape(-1, 2)
 
         actual = rotate_normals_batch(flats, errs_flat)
+
+        #we try to keep the normals inside a cone facing the ideal direction with an angle
+        # of theta_tolerance degrees 
+        #TODO : treat the tolerance as a hyperparameter and keep that in the optuna factors 
+
+        actual = project_onto_circular_cone(actual.view(-1, 3), ideal_normals.view(-1, 3), 0.28)
+
         #make sure that the values in the up direction are not less than or equal to zero
         #to do this, we use a sigmoid for the up direction
         modified_column = F.leaky_relu(actual[:, -1])
