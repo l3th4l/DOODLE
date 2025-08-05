@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import math
 
 # --- Vectorized Helper Functions ------------------------------------------------
@@ -316,6 +317,11 @@ class HelioField:
         errs_flat = errs.reshape(-1, 2)
 
         actual = rotate_normals_batch(flats, errs_flat)
+        #make sure that the values in the up direction are not less than or equal to zero
+        #to do this, we use a sigmoid for the up direction
+        modified_column = F.leaky_relu(actual[:, -1])
+        actual = actual.clone()
+        actual[:, -1] = modified_column
         actual = actual / actual.norm(dim=1, keepdim=True).clamp_min(1e-9)
         actual = actual.view(B, self.num_heliostats, 3)
 

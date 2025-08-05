@@ -101,7 +101,6 @@ class PolicyNet(nn.Module):
             nn.BatchNorm1d(feat_dim + aux_dim),
             nn.Linear(feat_dim + aux_dim, 256),
             nn.ReLU(),
-            nn.BatchNorm1d(256),
             nn.Linear(256, num_heliostats * 3)
         )
 
