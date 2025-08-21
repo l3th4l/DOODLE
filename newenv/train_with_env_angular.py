@@ -13,8 +13,7 @@ from scipy.ndimage import distance_transform_edt
 from datetime import datetime
 import matplotlib.pyplot as plt
 
-from test_environment import HelioEnv  # your multi-error env
-from plotting_utils import scatter3d_vectors
+from test_environment_angular import HelioEnv  # your multi-error env
 
 
 torch.autograd.set_detect_anomaly(False)  
@@ -44,6 +43,109 @@ class CNNEncoder(nn.Module):
         feat = self.cnn(x).flatten(1)
         return F.relu(self.proj(feat))
 # ---------------------------------------------------------------------------
+# Use Legacy Policy for now 
+'''
+class PolicyNet(nn.Module):
+    def __init__(self, img_channels, num_heliostats, aux_dim,
+                 enc_dim=128, lstm_hid=128, use_lstm=True):
+        super().__init__()
+        self.encoder = CNNEncoder(img_channels, enc_dim)
+        self.lstm    = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
+        self.head    = nn.Sequential(
+            nn.Linear(lstm_hid+aux_dim, 256), nn.ReLU(),
+            nn.Linear(256, num_heliostats*3)
+        )
+        self.num_h = num_heliostats
+
+    def forward(self, img_seq, aux, hx=None):
+        B,T,C,H,W = img_seq.shape
+        x = img_seq.view(B*T, C, H, W)
+        enc = self.encoder(x).view(B, T, -1)
+        out, hx = self.lstm(enc, hx)
+        last = out[:, -1]
+        x = torch.cat([last, aux], dim=1)
+        normals = self.head(x).view(B, self.num_h, 3)
+        return F.normalize(normals, dim=2), hx
+
+'''
+'''
+class PolicyNet(nn.Module):
+    def __init__(self,
+                 img_channels: int,
+                 num_heliostats: int,
+                 aux_dim: int,
+                 enc_dim: int = 128,
+                 lstm_hid: int = 128,
+                 use_lstm: bool = True):
+        """
+        Args:
+            img_channels: number of image channels in input
+            num_heliostats: how many normals to predict
+            aux_dim: dimension of extra (non-image) features
+            enc_dim: output dimension of CNNEncoder per frame
+            lstm_hid: hidden size of the LSTM (only used if use_lstm=True)
+            use_lstm: whether to run an LSTM over the encoded frames;
+                      if False, simply use the encoding of the last frame
+        """
+        super().__init__()
+        self.num_h = num_heliostats
+        self.use_lstm = use_lstm
+
+        # shared CNN encoder
+        self.encoder = CNNEncoder(img_channels, enc_dim)
+
+        if self.use_lstm:
+            # recurrent path
+            self.rnn   = nn.LSTM(enc_dim, lstm_hid, batch_first=True)
+            feat_dim   = lstm_hid
+        else:
+            # non‐recurrent path just uses the per‐frame encoding
+            feat_dim   = enc_dim
+
+        # final head takes [feat_dim + aux_dim] → hidden → num_heliostats*3
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim + aux_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_heliostats * 3)
+        )
+
+    def forward(self,
+                img_seq: torch.Tensor,
+                aux: torch.Tensor,
+                hx: tuple = None):
+        """
+        Args:
+            img_seq: (B, T, C, H, W) input image sequence
+            aux:     (B, aux_dim) auxiliary features
+            hx:      optional LSTM hidden state (ignored if use_lstm=False)
+        Returns:
+            normals: (B, num_heliostats, 3) unit‐length surface normals
+            hx:      new LSTM state if use_lstm=True, else None
+        """
+        B, T, C, H, W = img_seq.shape
+
+        # flatten frames into batch
+        x   = img_seq.view(B * T, C, H, W)
+        enc = self.encoder(x)            # (B*T, enc_dim)
+        enc = enc.view(B, T, -1)         # (B, T, enc_dim)
+
+        if self.use_lstm:
+            # run recurrent encoder
+            out, hx = self.rnn(enc, hx)
+            feat = out[:, -1, :]         # last time step
+        else:
+            # just pick the last‐frame encoding
+            feat = enc[:, -1, :]
+            hx   = None                  # no hidden state to carry forward
+
+        # concatenate aux features and predict
+        x       = torch.cat([feat, aux], dim=1)    # (B, feat_dim+aux_dim)
+        normals = self.head(x)                     # (B, num_h*3)
+        normals = normals.view(B, self.num_h, 3)
+        normals = F.normalize(normals, dim=2)
+
+        return normals, hx
+'''
 
 class PolicyNet(nn.Module):
     def __init__(self,
@@ -96,12 +198,12 @@ class PolicyNet(nn.Module):
         else:
             raise ValueError(f"Unknown architecture '{architecture}'. Choose 'mlp', 'lstm', or 'transformer'.")
 
-        # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*3
+        # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*2
         self.head = nn.Sequential(
-            nn.BatchNorm1d(feat_dim + aux_dim),
             nn.Linear(feat_dim + aux_dim, 256),
             nn.ReLU(),
-            nn.Linear(256, num_heliostats * 3)
+            nn.Linear(256, num_heliostats * 2)
+            nn.Tanh(),  # Use tanh to ensure angles are in [-1, 1]
         )
 
     def forward(self,
@@ -141,12 +243,12 @@ class PolicyNet(nn.Module):
 
         # concatenate aux features and predict
         x = torch.cat([feat, aux], dim=1)      # (B, feat_dim+aux_dim)
-        normals = self.head(x)                 # (B, num_h*3)
-        normals = normals.view(B, self.num_h, 3)
+        angles = self.head(x)                 # (B, num_h*3)
+        angles = angles.view(B, self.num_h, 3) * 50
 
-        normals = F.normalize(normals, dim=2)
-
-        return normals, hx
+        # TODO Replace with tanh and adjust for the range of angles +- deviations
+        
+        return angles, hx
 
 #TODO See if ther is a problem with the dimensions of the input image
 #NOTE Apparently not but with k=T, we're not utilizing the power of the LSTM
@@ -166,7 +268,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
     hist[:, -1] = img.clone()
 
     #mean loss dict
-    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0, 'alignment_loss': 0,}
+    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0}
     mse_over_t = []
 
     hx = None
@@ -175,14 +277,13 @@ def rollout(env, policy, k, T, device, use_mean=False):
 
         normals, hx = policy(net_img.detach(), aux.detach(), hx)
 
-        state_dict, loss_dict, monitor = env.step(normals)  
+        state_dict, loss_dict = env.step(normals)  
 
         if use_mean:
             # accumulate losses
             mean_loss_dict['mse'] = mean_loss_dict['mse'] + (1/T) * loss_dict['mse']
             mean_loss_dict['dist'] = mean_loss_dict['dist'] + (1/T) * loss_dict['dist']
             mean_loss_dict['bound'] = mean_loss_dict['bound'] + (1/T) * loss_dict['bound']
-            mean_loss_dict['alignment_loss'] = mean_loss_dict['alignment_loss'] + (1/T) * loss_dict['alignment_loss']
 
         mse_over_t.append(loss_dict['mse'].item())
 
@@ -191,12 +292,10 @@ def rollout(env, policy, k, T, device, use_mean=False):
         hist = torch.roll(hist, -1, dims=1)
         hist[:, -1] = img
 
-    #scatter3d_vectors(monitor['normals'].view([-1, 3]).detach().cpu().numpy(), monitor['all_bounds'].view([-1,1]).detach().cpu().numpy())
-
     if use_mean:
-        return mean_loss_dict, img, hist, mse_over_t, monitor
+        return mean_loss_dict, img, hist, mse_over_t
     else:
-        return loss_dict, img, hist, mse_over_t, monitor
+        return loss_dict, img, hist, mse_over_t
 
 # ---------------------------------------------------------------------------
 def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
@@ -207,7 +306,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     # geometry
     N = args.num_heliostats
     # heliostat positions
-    heliostat_pos = torch.rand(N,3,device=dev)*10 + 80; heliostat_pos[:,2]=0
+    heliostat_pos = torch.rand(N,3,device=dev)*10; heliostat_pos[:,2]=0
     targ_pos = torch.tensor([0.,-5.,0.],device=dev)
     targ_norm= torch.tensor([0., 1.,0.], device=dev)
     targ_area = (15.,15.)
@@ -221,7 +320,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             targ_pos = targ_pos,
             targ_area = targ_area,
             targ_norm = targ_norm,
-            sigma_scale=0.01,
+            sigma_scale=0.1,
             error_scale_mrad=args.error_scale_mrad,
             initial_action_noise=0.0,
             resolution=res,
@@ -231,12 +330,10 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             new_errors_every_reset=args.new_errors_every_reset,
             use_error_mask=args.use_error_mask, 
             error_mask_ratio=args.error_mask_ratio,
-            exponential_risk=False,
         )
         train_env.seed(args.seed + i)
-        if not (i == 0):
-            train_env.set_sun_pos(train_envs_list[0].sun_pos) 
         train_envs_list.append(train_env)
+
 
     # envs
     test_env = HelioEnv(
@@ -244,17 +341,15 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         targ_pos = targ_pos,
         targ_area = targ_area,
         targ_norm = targ_norm,
-        sigma_scale=0.01,
-        error_scale_mrad=args.error_scale_mrad,
+        sigma_scale=0.1,
+        error_scale_mrad=180.0,
         initial_action_noise=0.0,
-        resolution=res,
-        batch_size=20,
+        resolution=128,
+        batch_size=9,
         device=args.device,
         new_sun_pos_every_reset=False,
         new_errors_every_reset=False,
     )
-
-    test_env.set_sun_pos(train_envs_list[0].sun_pos[:20])
 
     # model + opt
     aux_dim = 3+N*3
@@ -272,7 +367,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             lambda mod, inp, out, n=n: log_if_nan(out, f"out {n}")
         )
 
-    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr, weight_decay=1e-5)
+    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if args.scheduler == "plateau":
         sched = ReduceLROnPlateau(opt, 'min', patience=args.scheduler_patience,
                                  factor=args.scheduler_factor, verbose=True)
@@ -283,14 +378,11 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         sched = ExponentialLR(opt, gamma=args.exp_decay)
 
     # decay-schedule params
-    alignment_f = args.alignment_f
-    anti_spill  = args.anti_spill
-    dist_f      = args.dist_f
-    mse_f       = args.mse_f
-
+    anti_spill = args.anti_spill
+    dist_f     = args.dist_f
+    mse_f     = args.mse_f
     # warmup-schedule params
     warmup_steps = args.warmup_steps
-    pretrain_steps = args.alignment_pretrain_steps
     active_training_steps = max(1, args.steps - warmup_steps)
     cutoff = int(0.8 * active_training_steps)  # 80 % of post-warm-up steps
 
@@ -300,17 +392,12 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     last_mse_loss = None
     best_mse_loss = None
 
-    # try with best alignment loss for the iterations when we do use the alignment loss 
-    last_alignment_loss = np.inf
-    best_alignment_loss = np.inf
-
-    for step in range(args.steps + pretrain_steps):
+    for step in range(args.steps):
         # get batch of envs
-        opt.zero_grad(set_to_none=True)
         for i in range(args.num_batches):
             train_env = train_envs_list[i]
-            #opt.zero_grad()
-            parts, pred_imgs, _, train_mse_over_t, monitor= rollout(train_env, policy,
+            opt.zero_grad()
+            parts, pred_imgs, _, train_mse_over_t = rollout(train_env, policy,
                                 args.k, args.T, dev, use_mean=args.use_mean)
 
             # ------------------------------------------------------------
@@ -319,31 +406,17 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             # save the boundary loss for later
             last_boundary_loss = parts['bound'].item()
 
-            #if (args.num_batches * step + i < (pretrain_steps)) or parts['alignment_loss'] > last_alignment_loss:
-            if True: #((args.num_batches * step + i < (pretrain_steps)) 
-                #or ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) and (parts['alignment_loss'] > best_alignment_loss))
-                #or (parts['alignment_loss'] > last_alignment_loss)):
-
-                loss = alignment_f * parts['alignment_loss']
-                if args.num_batches * step + i == (pretrain_steps -1):
-                    last_alignment_loss = parts['alignment_loss']
-                if parts['alignment_loss'] < best_alignment_loss:
-                    best_alignment_loss = parts['alignment_loss']
-
-            elif ((args.num_batches * step + i < (warmup_steps + pretrain_steps)) 
-                or (last_boundary_loss > args.boundary_thresh)):
-                
+            if (args.num_batches * step + i < warmup_steps) or (last_boundary_loss > args.boundary_thresh):
                 # if the boundary loss is too high, use only the boundary loss
                 loss = anti_spill * parts['bound']
             else:
-                eff_step = step - warmup_steps - pretrain_steps
+                eff_step = step - warmup_steps
                 decay = max(1e-5, (cutoff - eff_step) / cutoff)
                 loss  = (mse_f * parts['mse']*(1-decay+1e-5)
-                        + dist_f*parts['dist']*decay)
+                        + dist_f*parts['dist']*decay
+                        + anti_spill*parts['bound'])
 
-                        #+ anti_spill*parts['bound'])
-
-            (loss/args.num_batches).backward()
+            loss.backward()
 
             # if loss is NaN, print current lr
             if torch.isnan(loss):
@@ -356,46 +429,17 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     print("No last mse loss")
                     return np.nan
 
-            if i % (args.num_batches - 1) == 0:
-                # gradient clipping
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=args.grad_clip)
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=args.grad_clip)
 
-                opt.step()
-                if (args.num_batches * step + i > (warmup_steps + pretrain_steps)) : #(not args.disable_scheduler) and 
-                    if args.scheduler == "plateau":
-                        sched.step(parts['mse'].item())
-                    elif args.scheduler == "cyclic":
-                        sched.step()
-                    elif args.scheduler == "exp":
-                        sched.step()
-
-            
-            #save plots of normals and losses every k'th step 
-            if (step % 50 == 0) or step == args.steps-1:
-                scatter3d_vectors(
-                    monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_bounds.html')
-
-                scatter3d_vectors(
-                    monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image.html')
-                
-                scatter3d_vectors(
-                    monitor['ideal_normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image_ideal.html')
-                    
-                scatter3d_vectors(
-                    monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_r_bounds.html')
-
-                scatter3d_vectors(
-                    monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_r_mae_image.html')
+            opt.step()
+            if (args.num_batches * step + i > warmup_steps) : #(not args.disable_scheduler) and 
+                if args.scheduler == "plateau":
+                    sched.step(parts['mse'].item())
+                elif args.scheduler == "cyclic":
+                    sched.step()
+                elif args.scheduler == "exp":
+                    sched.step()
         # ------------------------------------------------------------
         # log train and test loss
 
@@ -404,7 +448,6 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             print(f"Step {step} | "
                   f"loss {loss:.4f} | "
                   f"mse_train {parts['mse']:.2e} |"
-                  f"alignment_train {parts['alignment_loss']:.2e} |"
                   f"current_lr {opt.param_groups[0]['lr']:.6f} | ")
 
         #debug code 
@@ -419,18 +462,13 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     writer.add_scalar(f"gradients/{name}", param.grad.mean(), step)
             # get test loss
             with torch.no_grad():
-                test_parts, _, _, test_mse_over_t, test_monitor = rollout(test_env, policy,
+                test_parts, _, _, test_mse_over_t = rollout(test_env, policy,
                                            args.k, args.T, dev)
 
             print(f"[{step:4d}] loss {loss:.4f} | "
                   f"mse_train{parts['mse']:.2e} dist_train {parts['dist']:.2e} "
-                  f"bound_train {parts['bound']:.2e} | test_mse {test_parts['mse']:.2e} test_bound {test_parts['bound']:.2e} test_alignment {test_parts['alignment_loss']:.2e}")
-        
-            scatter3d_vectors(
-                test_monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                test_monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                html_file=f'./monitors_debug/step_{step}/batch_{i}_test_r_mae_image.html')
-
+                  f"bound_train {parts['bound']:.2e} | test_mse {test_parts['mse']:.2e} test_bound {test_parts['bound']:.2e}")
+            
             last_mse_loss = test_parts['mse'].item()
             best_mse_loss = last_mse_loss if best_mse_loss is None else min(best_mse_loss, last_mse_loss)
 
@@ -439,7 +477,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             writer.add_scalar("bound/test", test_parts['bound'], step)
 
             # log test mse over time for testing
-            if step > (warmup_steps + pretrain_steps):
+            if step > warmup_steps:
                 for t in range(args.T):
                     writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], args.T*step + t)
 
@@ -450,14 +488,14 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         writer.add_scalar("hyperparams/lr", opt.param_groups[0]['lr'], step)
 
         # log train mse over time for training
-        if step > (warmup_steps + pretrain_steps):
+        if step > warmup_steps:
             for t in range(args.T):
                 writer.add_scalar(f"mse/train_over_t/", train_mse_over_t[t], args.T*step + t)
 
         if plot_heatmaps_in_tensorboard and (step % 100 == 0):
             imgs = pred_imgs
-            mins  = train_env.ref_min #imgs.view(imgs.size(0), -1).min(1)[0].view(-1,1,1)
-            maxs  = train_env.ref_max #imgs.view(imgs.size(0), -1).max(1)[0].view(-1,1,1)
+            mins  = imgs.view(imgs.size(0), -1).min(1)[0].view(-1,1,1)
+            maxs  = imgs.view(imgs.size(0), -1).max(1)[0].view(-1,1,1)
             norm_imgs = (imgs - mins) / (maxs - mins + 1e-6)
             # add_images expects (N, C, H, W); ensure a channel dim exists
             writer.add_images(
@@ -520,8 +558,6 @@ if __name__=="__main__":
                    help="Weight of the distance loss term.")
     p.add_argument("--mse_f",     type=float, default=1.0,
                    help="Weight of the distance loss term.")
-    p.add_argument("--alignment_f",     type=float, default=100,
-                   help="Weight of the alignment loss term. (only during pretraining)")
     p.add_argument("--new_errors_every_reset", type=bool, default=False,
                    help="Whether to resample errors every reset.")
     p.add_argument("--new_sun_pos_every_reset", type=bool, default=False,
@@ -529,9 +565,6 @@ if __name__=="__main__":
     p.add_argument("--warmup_steps", type=int, default=40,
                    help="Number of initial steps that use only the boundary "
                         "loss before switching to the full loss.")
-    p.add_argument("--alignment_pretrain_steps", type=int, default=100, 
-                   help="Number of pretraining steps with the alignment loss to"
-                        " ensure that the normals are focusing in the right direction.")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed for reproducibility.") 
     p.add_argument("--use_error_mask", type=bool, default=False,
