@@ -2,119 +2,272 @@
 <img src="./images/Doodle.png" alt="logo" width="1000"/>
 </p>
 
-# DOODLE (Not an acronym): Differentiable Heliostat Environment
+# DOODLE (Not an acronym): Differentiable Heliostat Optics Simulator
 
-This project implements a fully differentiable Gymnasium environment for heliostat control. It provides a simplified, extremely fast “ray-tracer” that approximates a small fraction of what [ARTIST](https://github.com/ARTIST-Association/ARTIST) does—though it does it worse. However, it can be used to train policies using differentiable reinforcement learning, which can then be fine-tuned on ARTIST for more realistic performance.
+A tiny, fast, **differentiable ray‑tracing simulator** inspired by [ARTIST](https://github.com/ARTIST-Association/ARTIST) for heliostat fields with **batched mirror‑orientation errors**—plus a Gymnasium‑style environment and a reference training loop.
 
-## Key Characteristics
+This repo is designed for research on **closed‑loop control** of heliostats in **concentrated solar power (CSP) tower** plants. It renders irradiance (“flux”) images on a planar receiver, supports per‑episode error sampling, and exposes clean hooks for RL / supervised training.
 
-- **Differentiable:** All operations are implemented in PyTorch, allowing gradients to flow through the simulation for gradient‐based optimization and reinforcement learning.
-- **Extremely Fast:** Designed for speed by tracing a single ray and using a single normal per heliostat.
-- **Simplified Approximation:**  
-  - Does not account for the distance from the receiver.
-  - Ignores the ray angles and other realistic physical factors.
-  - Provides only an approximation of flux predictions.
-- **Policy Pretraining:** The environment can be used to train policies via differentiable RL; these policies can later be fine-tuned on ARTIST to improve realism.
-- **Control Methods:**  
-  - **Aim Point Update:** Actions directly shift the target coordinates (aim points).
-  - **Motor Position Update ("m_pos"):** Actions represent angular rotations applied to the reflector normals.
+---
 
-## Features
+## What’s inside
 
-- **Differentiable Simulation:** End-to-end differentiability enables integration with modern RL and optimization algorithms.
-- **Target Area Rendering:** Heatmaps are generated using Gaussian blobs based on computed target positions.
-- **3D Visualization:** A `display` function visualizes heliostat positions, reflection rays, and the target area surface in 3D.
-- **Gymnasium Environment Interface:** Compliant with the Gymnasium API for `reset`, `step`, and `render`.
-
-## Requirements
-
-- Python 3.7+
-- [PyTorch](https://pytorch.org/)
-- [Gymnasium](https://github.com/Farama-Foundation/Gymnasium)
-- NumPy
-- Matplotlib
-
-Install dependencies via pip:
-
-```bash
-pip install torch gymnasium numpy matplotlib
+```
+.
+├─ newenv_rl_test_multi_error.py   # Core differentiable optics + HelioField
+├─ test_environment.py             # Gymnasium-like env (HelioEnv) + losses
+├─ train_with_env.py               # Reference training loop & policy nets
+└─ plotting_utils.py               # Pretty 3D plots of normals/rays (Plotly)
 ```
 
-## Project Structure
+### Key ideas
 
-- **`env.py`**  
-  Contains the `DifferentiableHeliostatEnv` class implementing the Gymnasium environment.
-  
-- **`utils.py`**  
-  Provides helper functions such as:
-  - `reflect_ray`
-  - `calculate_normals`
-  - `calculate_target_coordinates`
-  - `display` for 3D visualization
-  
-- **`target_area.py`**  
-  Contains the `TargetArea` class for target area coordinate conversions and rendering.
-  - `global_to_gaussian_blobs` (implemented as a method in the `TargetArea` class)
+* **Differentiable optics**: vectorized reflection, ray–plane intersections, Gaussian footprint on the receiver.
+* **Error modeling**: per‑sun‑position, per‑heliostat **orientation errors** (East/Up in mrad), reusable across batches for determinism.
+* **Batched rendering**: render B sun positions at once; errors are pre‑sampled and cached for speed/repeatability.
+* **Gym‑friendly**: `HelioEnv` returns images + auxiliary features and computes **MSE / distance‑weighted / boundary / alignment** losses.
+* **Plug‑in policies**: MLP / LSTM / Transformer heads with a shared CNN encoder.
 
-## Usage
+---
 
-### Running the Environment
+## Installation
 
-A main function is provided in `main.py` to test the environment. It will:
-1. Randomly sample a sun (light source) position and heliostat positions.
-2. Initialize a target area with a specified center, height, and width.
-3. For each control method:
-   - **Aim Point Update:** Randomly shifts target points, computes normals and reflection directions, renders a heatmap, and displays the 3D scene.
-   - **Motor Position Update ("m_pos"):** Applies angular rotations to the reflector normals, updates reflection directions, and renders a heatmap.
-4. Render the corresponding heatmaps and 3D visualizations with the target area surface overlay.
-    **Field Visualization**
-    <p align="center">
-    <img src="./images/Figure_1.png" alt="logo" width="900"/>
-    </p>
-
-    **Predicted Flux Heatmap**
-    <p align="center">
-    <img src="./images/render.png" alt="logo" width="500"/>
-    </p>
-
-To run the example:
+> Python ≥ 3.10 recommended.
 
 ```bash
-python main.py
+# create and activate a venv (recommended)
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+pip install -U pip wheel
+
+# core deps
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # pick your CUDA/CPU build
+pip install gymnasium numpy scipy plotly tensorboard matplotlib
+
+# (optional) jupyter for quick experiments
+pip install jupyter
 ```
 
-### Integrating with Reinforcement Learning
+---
 
-The environment follows the Gym API. For example:
+## Quick start
+
+### 1) Render once with the differentiable optics core
 
 ```python
 import torch
-from differentiable_heliostat_env import DifferentiableHeliostatEnv
+from newenv_rl_test_multi_error import HelioField
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = DifferentiableHeliostatEnv(control_method="aim_point", device=device)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-obs = env.reset()
-done = False
+# Minimal toy geometry
+N = 50
+helios = torch.rand(N, 3, device=device) * 10
+helios[:, 2] = 0.0  # on ground
+target_pos = torch.tensor([0., -5., 0.], device=device)
+target_norm = torch.tensor([0.,  1., 0.], device=device)  # faces +Y
+target_area = (15., 15.)  # (width, height)
 
-while not done:
-    action = env.action_space.sample()  # or your agent's action
-    obs, reward, done, truncated, info = env.step(action)
-    env.render()  # Visualize the 3D scene (optional)
+field = HelioField(
+    heliostat_positions=helios,
+    target_position=target_pos,
+    target_area=target_area,
+    target_normal=target_norm,
+    error_scale_mrad=90.0,
+    sigma_scale=0.1,
+    resolution=128,
+    device=device,
+    max_batch_size=25,   # pre-allocates reusable error batches
+)
+
+# Prepare one sun position and an initial action (normals)
+sun = torch.tensor([700., 700., 700.], device=device)  # arbitrary
+field.init_actions(sun)
+img, actual_normals = field.render(sun, field.initial_action)  # (128,128), (N,3)
+print(img.shape, actual_normals.shape)
 ```
 
-## Limitations
+### 2) Use the Gym‑style environment
 
-- **Simplified Model:** This environment is a rough approximation of ARTIST. It traces one ray per heliostat with a single normal, ignoring the ray angles, distance effects, and other realistic physical factors.
-- **Flux Predictions:** The simplified model does not capture the full complexity of flux predictions as in realistic heliostat control.
+```python
+import torch
+from test_environment import HelioEnv
 
-## Policy Pretraining and Fine-Tuning
+device = "cuda" if torch.cuda.is_available() else "cpu"
+N = 50
+helios = torch.rand(N, 3, device=device); helios[:, 2] = 0.0
 
-Despite its simplifications, this environment is differentiable and extremely fast. It can be used to train policies using differentiable reinforcement learning. Once a policy is pre-trained in this environment, it can be fine-tuned on ARTIST for more accurate and realistic heliostat control.
+env = HelioEnv(
+    heliostat_pos=helios,
+    targ_pos=torch.tensor([0., -5., 0.], device=device),
+    targ_area=(15., 15.),
+    targ_norm=torch.tensor([0., 1., 0.], device=device),
+    sigma_scale=0.1,
+    error_scale_mrad=180.0,
+    resolution=128,
+    batch_size=25,
+    device=device,
+)
+
+obs = env.reset()                          # {'img': (B,1,H,W), 'aux': (B, 3+N*3)}
+action = torch.randn(env.batch_size, N*3, device=device)  # dummy normals
+obs, metrics, monitor = env.step(action)   # metrics: mse, dist, bound, alignment_loss
+print({k: float(v) for k, v in metrics.items()})
+```
+
+---
+
+## Train a policy
+
+A reference training script with CNN encoder + (MLP/LSTM/Transformer) head, TensorBoard logging, LR schedulers, gradient clipping, and periodic 3D diagnostics.
+
+```bash
+# default LSTM policy, single training batch, batch_size=25
+python train_with_env.py --device cuda --num_heliostats 50 --steps 5000
+
+# try a Transformer head
+python train_with_env.py --architecture transformer --transformer_layers 2 --transformer_heads 8
+
+# ramp up misalignment pretraining
+python train_with_env.py --alignment_pretrain_steps 200 --alignment_f 150
+```
+
+### Notable CLI knobs
+
+* **Geometry & data**
+
+  * `--num_heliostats` (default 50), `--resolution` (128)
+  * `--batch_size` (25), `--num_batches` (1): number of *environment replicas* per step
+* **Loss scheduling**
+
+  * `--alignment_pretrain_steps` (100) & `--alignment_f` (100)
+  * `--warmup_steps` (40) using only boundary loss
+  * Post warm‑up blend of MSE and distance‑weighted errors (`--mse_f`, `--dist_f`)
+* **Schedulers**
+
+  * `--scheduler [exp|plateau|cyclic]`, with `--exp_decay`, or `--scheduler_patience/factor`, or `--step_size_up/down`
+* **Regularization**
+
+  * `--grad_clip` (default `1e-7`)
+  * `--use_error_mask` + `--error_mask_ratio`: focus losses on the worst‑k% images
+
+TensorBoard runs are written under `runs_multi_error_env/…`. Launch:
+
+```bash
+tensorboard --logdir runs_multi_error_env
+```
+
+---
+
+## Visual diagnostics (3D)
+
+`plotting_utils.scatter3d_vectors(...)` helps visualize:
+
+* predicted normals vs. **boundary violations**,
+* predicted normals vs. **per‑image MAE**,
+* reflected ray directions.
+
+The training script periodically writes standalone HTML plots under `./monitors_debug/step_XXX/…`, which you can open in any browser (even from remote machines via VS Code).
+
+---
+
+## API overview
+
+### `HelioField` (core optics)
+
+```python
+HelioField(
+    heliostat_positions: Tensor[N,3],
+    target_position:     Tensor[3],
+    target_area:         tuple[float, float],   # (width, height)
+    target_normal:       Tensor[3],
+    error_scale_mrad:    float = 1.0,           # orientation error σ (mrad)
+    sigma_scale:         float = 0.01,          # Gaussian σ ∝ distance
+    initial_action_noise: float = 0.01,         # noise for init actions
+    resolution:          int = 100,
+    device:              str|torch.device = "cpu",
+    max_batch_size:      int = 25,              # pre‑alloc error cache
+)
+```
+
+Methods (most used):
+
+* `calculate_ideal_normals(sun_position) -> (N,3) or (B,N,3)`
+* `init_actions(sun_position) -> None` (stores `initial_action`)
+* `reset_errors() -> None` (resamples both single‑sun & batched error tensors)
+* `render(sun_position, action, monitor=False) ->`
+
+  * if single sun: `(H,W), (N,3)` **or** `(H,W), (N,3), (H*N,3)` with `monitor=True`
+  * if batched: `(B,H,W), (B,N,3)` **or** `(B,H,W), (B,N,3), (B*N,3)`
+
+Internals you might reuse:
+
+* `reflect_vectors(incidents, normals)`
+* `ray_plane_intersection_batch(origins, dirs, plane_point, plane_normal)`
+* `gaussian_blur_batch(...)` → per‑mirror Gaussian footprints on the receiver
+
+### `HelioEnv` (Gymnasium‑like)
+
+Observations:
+
+* `obs['img']` : `(B, 1, H, W)` flux image(s)
+* `obs['aux']` : `(B, 3 + N*3)` → **sun position (3)** + **ideal normals (N\*3)**
+
+`step(action)`:
+
+* `action`: `(B, N*3)` flattened predicted normals (will be normalized)
+* returns `(obs, metrics, monitor)` where:
+
+  * `metrics`:
+
+    * `mse` — image MSE (normalized by target peak),
+    * `dist` — distance‑weighted absolute error (uses EDT maps),
+    * `bound` — anti‑spillage penalty (outside receiver box),
+    * `alignment_loss` — mean angle (mrad) between ideal & actual normals.
+  * `monitor`:
+
+    * `normals`, `ideal_normals`, `reflected_rays`, `all_bounds`, `mae_image`
+
+---
+
+## Design notes & tips
+
+* **Deterministic errors across calls**: for batched calls, orientation error tensors are pre‑sampled up to `max_batch_size` and **reused** until `reset_errors()`. This makes debugging and curriculum schedules stable.
+* **Up‑axis safety**: a sigmoid constraint keeps the **Up component** of rotated normals non‑negative to avoid shooting into the ground.
+* **Distance‑aware loss**: errors far from the receiver center are penalized more (via Euclidean Distance Transform on a high‑flux mask).
+* **Boundary penalty**: encourages all intersections to lie within a **shrunk (75%) receiver box** (tunable), robust to rays nearly parallel to the plane.
+
+---
+
+## Troubleshooting
+
+* **NaNs/Infs during training**
+  The training loop registers forward/grad hooks and prints offenders. Check LR (`--lr`), `--grad_clip`, and whether you enabled an aggressive scheduler.
+* **All‑black images**
+  Ensure sun Z component is positive (upper hemisphere) and your normals aren’t flipped. In `HelioEnv`, sun directions are normalized and Z is forced ≥ 0.
+* **Mismatch shapes**
+  `action` must flatten to `(B, N*3)` and will be reshaped internally. Your policy should output unit normals or leave normalization to the env.
+
+---
+
+## Citation
+
+If you use this simulator in academic work, please cite the repository (and, if applicable, your thesis on heliostat control with differentiable ray tracing).
+
+```
+@software{heliostat_differentiable_sim,
+  title  = {Differentiable Heliostat Optics Simulator (DOODLE)},
+  year   = {2025},
+  note   = {GitHub repository},
+}
+```
+
+---
 
 ## Acknowledgements
 
-This project is inspired by ARTIST and the need for differentiable simulation environments in heliostat control, and has been made at the German Aerospace Center (DLR).
+Built as part of a research project on **RL for heliostat control in differentiable ray‑tracing simulators** at the German Aerospace Center (DLR).
 
 
 -----------
