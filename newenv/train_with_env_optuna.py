@@ -16,17 +16,13 @@ import matplotlib.pyplot as plt
 from test_environment import HelioEnv  # your multi-error env
 from plotting_utils import scatter3d_vectors
 
+from copy import deepcopy
+import itertools
+
+import os, optuna, multiprocessing as mp
 
 torch.autograd.set_detect_anomaly(False)  
-# ---------------------------------------------------------------------------
-# anomaly loggers
-def log_if_nan(tensor, name):
-    if isinstance(tensor, torch.Tensor):
-        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-            print(f"⚠️  NaN/Inf found in {name}: {tensor}")
-    elif isinstance(tensor, tuple):
-        for i, t in enumerate(tensor):
-            log_if_nan(t, f"{name}[{i}]")
+
 
 # ---------------------------------------------------------------------------
 class CNNEncoder(nn.Module):
@@ -199,6 +195,7 @@ def rollout(env, policy, k, T, device, use_mean=False):
         return loss_dict, img, hist, mse_over_t, monitor
 
 # ---------------------------------------------------------------------------
+#TODO Add trial pruning
 def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
     # device
     dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -207,7 +204,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     # geometry
     N = args.num_heliostats
     # heliostat positions
-    heliostat_pos = torch.rand(N,3,device=dev)*10 + 80; heliostat_pos[:,2]=0
+    heliostat_pos = torch.rand(N,3,device=dev)*10 + 100; heliostat_pos[:,2]=0
     targ_pos = torch.tensor([0.,-5.,0.],device=dev)
     targ_norm= torch.tensor([0., 1.,0.], device=dev)
     targ_area = (15.,15.)
@@ -221,7 +218,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             targ_pos = targ_pos,
             targ_area = targ_area,
             targ_norm = targ_norm,
-            sigma_scale=0.01,
+            sigma_scale=0.1,
             error_scale_mrad=args.error_scale_mrad,
             initial_action_noise=0.0,
             resolution=res,
@@ -234,9 +231,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             exponential_risk=False,
         )
         train_env.seed(args.seed + i)
-        if not (i == 0):
-            train_env.set_sun_pos(train_envs_list[0].sun_pos) 
         train_envs_list.append(train_env)
+
 
     # envs
     test_env = HelioEnv(
@@ -244,17 +240,15 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         targ_pos = targ_pos,
         targ_area = targ_area,
         targ_norm = targ_norm,
-        sigma_scale=0.01,
-        error_scale_mrad=args.error_scale_mrad,
+        sigma_scale=0.1,
+        error_scale_mrad=180.0,
         initial_action_noise=0.0,
-        resolution=res,
-        batch_size=20,
+        resolution=128,
+        batch_size=9,
         device=args.device,
         new_sun_pos_every_reset=False,
         new_errors_every_reset=False,
     )
-
-    test_env.set_sun_pos(train_envs_list[0].sun_pos[:20])
 
     # model + opt
     aux_dim = 3+N*3
@@ -272,7 +266,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             lambda mod, inp, out, n=n: log_if_nan(out, f"out {n}")
         )
 
-    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr, weight_decay=1e-5)
+    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if args.scheduler == "plateau":
         sched = ReduceLROnPlateau(opt, 'min', patience=args.scheduler_patience,
                                  factor=args.scheduler_factor, verbose=True)
@@ -306,10 +300,9 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
     for step in range(args.steps + pretrain_steps):
         # get batch of envs
-        opt.zero_grad(set_to_none=True)
         for i in range(args.num_batches):
             train_env = train_envs_list[i]
-            #opt.zero_grad()
+            opt.zero_grad()
             parts, pred_imgs, _, train_mse_over_t, monitor= rollout(train_env, policy,
                                 args.k, args.T, dev, use_mean=args.use_mean)
 
@@ -343,7 +336,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
                         #+ anti_spill*parts['bound'])
 
-            (loss/args.num_batches).backward()
+            loss.backward()
 
             # if loss is NaN, print current lr
             if torch.isnan(loss):
@@ -356,18 +349,17 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     print("No last mse loss")
                     return np.nan
 
-            if i % (args.num_batches - 1) == 0:
-                # gradient clipping
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=args.grad_clip)
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=args.grad_clip)
 
-                opt.step()
-                if (args.num_batches * step + i > (warmup_steps + pretrain_steps)) : #(not args.disable_scheduler) and 
-                    if args.scheduler == "plateau":
-                        sched.step(parts['mse'].item())
-                    elif args.scheduler == "cyclic":
-                        sched.step()
-                    elif args.scheduler == "exp":
-                        sched.step()
+            opt.step()
+            if (args.num_batches * step + i > (warmup_steps + pretrain_steps)) : #(not args.disable_scheduler) and 
+                if args.scheduler == "plateau":
+                    sched.step(parts['mse'].item())
+                elif args.scheduler == "cyclic":
+                    sched.step()
+                elif args.scheduler == "exp":
+                    sched.step()
 
             
             #save plots of normals and losses every k'th step 
@@ -424,13 +416,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
             print(f"[{step:4d}] loss {loss:.4f} | "
                   f"mse_train{parts['mse']:.2e} dist_train {parts['dist']:.2e} "
-                  f"bound_train {parts['bound']:.2e} | test_mse {test_parts['mse']:.2e} test_bound {test_parts['bound']:.2e} test_alignment {test_parts['alignment_loss']:.2e}")
-        
-            scatter3d_vectors(
-                test_monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                test_monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                html_file=f'./monitors_debug/step_{step}/batch_{i}_test_r_mae_image.html')
-
+                  f"bound_train {parts['bound']:.2e} | test_mse {test_parts['mse']:.2e} test_bound {test_parts['bound']:.2e}")
+            
             last_mse_loss = test_parts['mse'].item()
             best_mse_loss = last_mse_loss if best_mse_loss is None else min(best_mse_loss, last_mse_loss)
 
@@ -471,33 +458,97 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
     return best_mse_loss if return_best_mse else last_mse_loss
 
+SEED = 42
+def run_study(args):
+
+    error_scale_list = [25.0, 75.0, 125.0]
+    batch_size_list = [25, 100, 250, 500]
+    num_batches_list = [1, 2, 3, 4, 5]
+    
+    T_list = [2, 4, 6, 8, 10]
+    k_list = [2, 4, 8]
+
+    architecture_list = ['lstm', 'transformer', 'mlp']
+    #TODO needs architecture specific configurations 
+
+    use_mean_list = [True, False]
+
+    config_list = list(itertools.product(
+                        error_scale_list, 
+                        batch_size_list, 
+                        num_batches_list, 
+                        T_list, 
+                        k_list, 
+                        architecture_list, 
+                        use_mean_list,
+                        ))
+                        
+
+    num_gpus = torch.cuda.device_count()
+    assert num_gpus > 0, "No GPUs found."
+
+    total_trials = 60
+    trials_per_worker = int(total_trials / num_gpus)
+
+    for config in config_list:
+        
+        study_name = '_'.join([str(hparam) for hparam in config])
+
+        study = optuna.create_study(
+                        direction="minimize",
+                        sampler=optuna.samplers.TPESampler(seed=SEED),
+                        study_name=study_name,
+                        )
+
+        #paarameters for bayesian search
+
+        trial_args = deepcopy(args)
+        
+        #set fixed trial args and paass to trial wrapper 
+        
+
+def trial_wrapper(trial, trial_args):
+    
+    trial_args.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+
 # ---------------------------------------------------------------------------
 if __name__=="__main__":
     
-    
     p = argparse.ArgumentParser()
-    p.add_argument("--num_heliostats", type=int, default=50)
-    p.add_argument("--error_scale_mrad", type=float, default=90.0)
-    p.add_argument("--batch_size", type=int, default=25)
-    p.add_argument("--num_batches", type=int, default=1)
+
+    #---------------- HYPERPARAMETERS FOR GRID SEARCH -----------------------
+
+    #p.add_argument("--error_scale_mrad", type=float, default=90.0) #grid
+    #p.add_argument("--batch_size", type=int, default=25) #grid
+    #p.add_argument("--num_batches", type=int, default=1) #grid
+
+    #p.add_argument("--T",          type=int, default=4) #grid
+    #p.add_argument("--k",          type=int, default=4) #grid
+    #p.add_argument("--architecture", type=str, default="lstm",
+    #               help="Network architecture: lstm, transformer, mlp") #grid
+
+    #p.add_argument("--use_mean", type=bool, default=False,
+    #               help="Whether to use mean loss over the batch.")
+
+    #--------------- HYPERPARAMETERS FOR BAYESIAN OPTIMIZATION ------------
+
+    p.add_argument("--lr",         type=float, default=2e-4) #bayes
+    p.add_argument("--lstm_hid",  type=int, default=128) #bayes
+    p.add_argument("--transformer_layers", type=int, default=2) #bayes
+    p.add_argument("--transformer_heads", type=int, default=8) # bayes
+
+    #--------------- OTHER HYPERPARRAMETERS -------------------------------
+
+    p.add_argument("--num_heliostats", type=int, default=1)
     p.add_argument("--steps",      type=int, default=5000)
-    p.add_argument("--T",          type=int, default=4)
-    p.add_argument("--k",          type=int, default=4)
-    p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cpu")
-    p.add_argument("--use_lstm",     type=bool, default=False)
+    p.add_argument("--use_lstm",     type=bool, default=False) #depricated TODO fix this
     p.add_argument("--grad_clip",  type=float, default=1e-7, 
                    help="Gradient clipping threshold.")
-    p.add_argument("--architecture", type=str, default="lstm",
-                   help="Network architecture: lstm, transformer, mlp")
-    p.add_argument("--lstm_hid",  type=int, default=128)
-    p.add_argument("--transformer_layers", type=int, default=2)
-    p.add_argument("--transformer_heads", type=int, default=8)
-    p.add_argument("--disable_scheduler", type=bool, default=False)
-    p.add_argument("--use_mean", type=bool, default=False,
-                   help="Whether to use mean loss over the batch.")
+
+    p.add_argument("--disable_scheduler", type=bool, default=False) #TODO remove this redundancy
     p.add_argument("--scheduler", type=str, default="exp",
-                   help="Learning rate scheduler: plateau, cyclic, exp")
+                   help="Learning rate scheduler: plateau, cyclic, exp") # grid
     p.add_argument("--scheduler_patience", type=int, default=50,
                    help="Patience for the plateau scheduler.")
     p.add_argument("--scheduler_factor", type=float, default=0.27,
