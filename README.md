@@ -1,5 +1,5 @@
 <p align="center">
-<img src="./images/Doodle.png" alt="logo" width="1000"/>
+<img src="./images/Differentiable Optics.png" alt="logo" width="1000"/>
 </p>
 
 # DOODLE (Not an acronym): Differentiable Heliostat Optics Simulator
