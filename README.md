@@ -4,7 +4,7 @@
 
 # DOODLE (Not an acronym): Differentiable Heliostat Optics Simulator
 
-A tiny, fast, **differentiable ray‑tracing simulator** inspired by [ARTIST](https://github.com/ARTIST-Association/ARTIST) for heliostat fields with **batched mirror‑orientation errors**—plus a Gymnasium‑style environment and a reference training loop.
+A tiny, fast, **differentiable ray‑tracing simulator** inspired by [ARTIST](https://github.com/ARTIST-Association/ARTIST) for heliostat fields with **batched heliostat‑orientation errors**—plus a Gymnasium‑style environment and a reference training loop.
 
 This repo is designed for research on **closed‑loop control** of heliostats in **concentrated solar power (CSP) tower** plants. It renders irradiance (“flux”) images on a planar receiver, supports per‑episode error sampling, and exposes clean hooks for RL / supervised training.
 
