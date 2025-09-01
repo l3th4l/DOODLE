@@ -13,6 +13,8 @@ from scipy.ndimage import distance_transform_edt
 from datetime import datetime
 import matplotlib.pyplot as plt
 
+from adamp import AdamP
+
 from test_environment import HelioEnv  # your multi-error env
 from plotting_utils import scatter3d_vectors
 
@@ -30,19 +32,22 @@ def log_if_nan(tensor, name):
 
 # ---------------------------------------------------------------------------
 class CNNEncoder(nn.Module):
-    def __init__(self, in_channels: int, out_dim: int=128):
+    def __init__(self, in_channels: int, out_dim: int=128, dropout=0.1):
         super().__init__()
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 5, padding=2), nn.ReLU(),
-            nn.Conv2d(32, 64, 5, padding=2),          nn.ReLU(),
-            nn.Conv2d(64, 128,5, padding=2),          nn.ReLU(),
+            nn.Conv2d(in_channels, 32, 5, padding=2), nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(32, 64, 5, padding=2),          nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(64, 128,5, padding=2),          nn.GELU(),
+            nn.Dropout2d(dropout),
             nn.AdaptiveAvgPool2d((1,1))
         )
         self.proj = nn.Linear(128, out_dim)
 
     def forward(self, x):
         feat = self.cnn(x).flatten(1)
-        return F.relu(self.proj(feat))
+        return F.gelu(self.proj(feat))
 # ---------------------------------------------------------------------------
 
 class PolicyNet(nn.Module):
@@ -55,7 +60,8 @@ class PolicyNet(nn.Module):
                  transformer_layers: int = 2,
                  transformer_heads: int = 8,
                  architecture: str = "lstm", 
-                 use_lstm: bool = True):  # options: 'mlp', 'lstm', 'transformer'
+                 use_lstm: bool = True, 
+                 dropout=0.1):  # options: 'mlp', 'lstm', 'transformer'
         """
         Args:
             img_channels: number of image channels in input
@@ -72,7 +78,7 @@ class PolicyNet(nn.Module):
         self.arch = architecture.lower()
 
         # shared CNN encoder
-        self.encoder = CNNEncoder(img_channels, enc_dim)
+        self.encoder = CNNEncoder(img_channels, enc_dim, dropout=dropout)
 
         if self.arch == 'lstm':
             if not use_lstm:
@@ -86,7 +92,8 @@ class PolicyNet(nn.Module):
             # transformer path
             encoder_layer = nn.TransformerEncoderLayer(d_model=enc_dim,
                                                        nhead=transformer_heads,
-                                                       batch_first=True)
+                                                       batch_first=True, 
+                                                       dropout=dropout)
             self.transformer = nn.TransformerEncoder(encoder_layer,
                                                      num_layers=transformer_layers)
             feat_dim = enc_dim
@@ -98,9 +105,11 @@ class PolicyNet(nn.Module):
 
         # final head takes [feat_dim + aux_dim] -> hidden -> num_heliostats*3
         self.head = nn.Sequential(
-            nn.BatchNorm1d(feat_dim + aux_dim),
+            #nn.BatchNorm1d(feat_dim + aux_dim),
+            nn.LayerNorm(feat_dim + aux_dim),
             nn.Linear(feat_dim + aux_dim, 256),
-            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.GELU(),
             nn.Linear(256, num_heliostats * 3)
         )
 
@@ -132,8 +141,11 @@ class PolicyNet(nn.Module):
             # Transformer encoder (batch_first)
             # enc: (B, T, enc_dim)
             trans_out = self.transformer(enc)  # (B, T, enc_dim)
-            feat = trans_out[:, -1, :]
-            hx = None
+            if not (hx == None):    
+                feat = trans_out[:, -1, :] + hx
+            else:
+                feat = trans_out[:, -1, :]
+            hx = feat
         else:
             # MLP path uses last-frame encoding
             feat = enc[:, -1, :]
@@ -239,6 +251,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         train_envs_list.append(train_env)
 
     # envs
+    test_size = 60
     test_env = HelioEnv(
         heliostat_pos = heliostat_pos,
         targ_pos = targ_pos,
@@ -248,13 +261,13 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         error_scale_mrad=args.error_scale_mrad,
         initial_action_noise=0.0,
         resolution=res,
-        batch_size=20,
+        batch_size=test_size,
         device=args.device,
         new_sun_pos_every_reset=False,
         new_errors_every_reset=False,
     )
 
-    test_env.set_sun_pos(train_envs_list[0].sun_pos[:20])
+    test_env.set_sun_pos(train_envs_list[0].sun_pos[:test_size])
 
     # model + opt
     aux_dim = 3+N*3
@@ -272,7 +285,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             lambda mod, inp, out, n=n: log_if_nan(out, f"out {n}")
         )
 
-    opt   = torch.optim.Adam(policy.parameters(), lr=args.lr, weight_decay=1e-5)
+    opt   = AdamP(policy.parameters(), lr=args.lr, weight_decay=1e-5)
     if args.scheduler == "plateau":
         sched = ReduceLROnPlateau(opt, 'min', patience=args.scheduler_patience,
                                  factor=args.scheduler_factor, verbose=True)
@@ -418,9 +431,12 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                 if param.grad is not None:
                     writer.add_scalar(f"gradients/{name}", param.grad.mean(), step)
             # get test loss
+
+            policy.eval() # disable training time thingies 
             with torch.no_grad():
                 test_parts, _, _, test_mse_over_t, test_monitor = rollout(test_env, policy,
                                            args.k, args.T, dev)
+            policy.train() # enable training time thingies 
 
             print(f"[{step:4d}] loss {loss:.4f} | "
                   f"mse_train{parts['mse']:.2e} dist_train {parts['dist']:.2e} "
