@@ -321,7 +321,7 @@ class HelioEnv(gym.Env):
             sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
 
         # Position the suns at a fixed range from origin
-        radius  = math.hypot(1000, 1000)
+        radius  = math.hypot(10000, 10000)
         sun_pos = sun_dirs * radius
         self.set_sun_pos(sun_pos)
 
@@ -487,6 +487,8 @@ class HelioEnv(gym.Env):
                         self.targ_area, 
                         u, v, return_all=True)
 
+        all_alignment_errors = calculate_angles_mrad(ideal_normals, actual_normals).detach().view([-1])
+
         mean_absolute_error = err.mean(dim = [-1, -2]).view([-1, 1])
 
         #assert no nan in metrics
@@ -508,6 +510,7 @@ class HelioEnv(gym.Env):
                     'ideal_normals': ideal_normals.view([-1, 3]), 
                     'all_bounds': all_bounds, 
                     'mae_image': mean_absolute_error,
+                    'alignment_errors': all_alignment_errors,
                     }
 
         return obs, metrics, monitor
