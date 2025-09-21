@@ -1,12 +1,14 @@
+
+
 <p align="center">
 <img src="./images/Differentiable Optics.png" alt="logo" width="1000"/>
 </p>
 
 # DOODLE (Not an acronym): Differentiable Heliostat Optics Simulator
 
-A tiny, fast, **differentiable ray‑tracing simulator** inspired by [ARTIST](https://github.com/ARTIST-Association/ARTIST) for heliostat fields with **batched heliostat‑orientation errors**—plus a Gymnasium‑style environment and a reference training loop.
+A tiny, fast, **differentiable ray-tracing simulator** inspired by [ARTIST](https://github.com/ARTIST-Association/ARTIST) for heliostat fields with **batched heliostat-orientation errors**—plus a Gymnasium-style environment and a reference training loop.
 
-This repo is designed for research on **closed‑loop control** of heliostats in **concentrated solar power (CSP) tower** plants. It renders irradiance (“flux”) images on a planar receiver, supports per‑episode error sampling, and exposes clean hooks for RL / supervised training.
+This repo is designed for research on **closed-loop control** of heliostats in **concentrated solar power (CSP) tower** plants. It renders irradiance (“flux”) images on a planar receiver, supports per-episode error sampling, and exposes clean hooks for RL / supervised training.
 
 ---
 
@@ -22,11 +24,11 @@ This repo is designed for research on **closed‑loop control** of heliostats in
 
 ### Key ideas
 
-* **Differentiable optics**: vectorized reflection, ray–plane intersections, Gaussian footprint on the receiver.
-* **Error modeling**: per‑sun‑position, per‑heliostat **orientation errors** (East/Up in mrad), reusable across batches for determinism.
-* **Batched rendering**: render B sun positions at once; errors are pre‑sampled and cached for speed/repeatability.
-* **Gym‑friendly**: `HelioEnv` returns images + auxiliary features and computes **MSE / distance‑weighted / boundary / alignment** losses.
-* **Plug‑in policies**: MLP / LSTM / Transformer heads with a shared CNN encoder.
+* **Differentiable optics**: vectorized reflection, ray–plane intersections, Gaussian footprint on the receiver.&#x20;
+* **Deterministic error modeling**: per-sun-position, per-heliostat **orientation errors** (East/Up in mrad), pre-sampled and **reused** across calls until you `reset_errors()`.&#x20;
+* **Batched rendering**: render B sun positions at once; pre-allocated error tensors keep results reproducible.&#x20;
+* **Gym-friendly**: `HelioEnv` returns images + auxiliary features and computes **MSE / distance-weighted / boundary / alignment** losses.&#x20;
+* **Plug-in policies**: CNN encoder with MLP / LSTM / Transformer heads; schedulers, gradient clipping, TensorBoard logging, and 3-D diagnostics included.&#x20;
 
 ---
 
@@ -41,13 +43,14 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 pip install -U pip wheel
 
-# core deps
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # pick your CUDA/CPU build
-pip install gymnasium numpy scipy plotly tensorboard matplotlib
+# Core deps (pick a CUDA/CPU build that fits your system)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# (optional) jupyter for quick experiments
-pip install jupyter
+# Project deps
+pip install gymnasium numpy scipy plotly tensorboard matplotlib adamp
 ```
+
+*We use the AdamP optimizer from `adamp` in the training script.*&#x20;
 
 ---
 
@@ -65,7 +68,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 N = 50
 helios = torch.rand(N, 3, device=device) * 10
 helios[:, 2] = 0.0  # on ground
-target_pos = torch.tensor([0., -5., 0.], device=device)
+target_pos  = torch.tensor([0., -5., 0.], device=device)
 target_norm = torch.tensor([0.,  1., 0.], device=device)  # faces +Y
 target_area = (15., 15.)  # (width, height)
 
@@ -78,17 +81,22 @@ field = HelioField(
     sigma_scale=0.1,
     resolution=128,
     device=device,
-    max_batch_size=25,   # pre-allocates reusable error batches
+    max_batch_size=25,
 )
 
 # Prepare one sun position and an initial action (normals)
-sun = torch.tensor([700., 700., 700.], device=device)  # arbitrary
+sun = torch.tensor([700., 700., 700.], device=device)
+ideal = field.calculate_ideal_normals(sun)
 field.init_actions(sun)
-img, actual_normals = field.render(sun, field.initial_action)  # (128,128), (N,3)
+
+# NOTE: render() now expects (sun, action, ideal_normals, ...)
+img, actual_normals = field.render(sun, field.initial_action, ideal)
 print(img.shape, actual_normals.shape)
 ```
 
-### 2) Use the Gym‑style environment
+*`render(sun, action, ideal_normals, monitor=False)` returns `(H, W), (N, 3)` for single-sun or `(B, H, W), (B, N, 3)` for batched calls; set `monitor=True` to also receive reflected ray directions.*&#x20;
+
+### 2) Use the Gym-style environment
 
 ```python
 import torch
@@ -108,51 +116,44 @@ env = HelioEnv(
     resolution=128,
     batch_size=25,
     device=device,
+    new_sun_pos_every_reset=False,
+    new_errors_every_reset=True,
+    use_error_mask=False,    # set True to focus on worst-k% images
+    error_mask_ratio=0.2,    # k (e.g., 0.2 = worst 20%)
 )
 
-obs = env.reset()                          # {'img': (B,1,H,W), 'aux': (B, 3+N*3)}
-action = torch.randn(env.batch_size, N*3, device=device)  # dummy normals
+obs = env.reset()                          # {'img': (B, H, W), 'aux': (B, 3 + N*3)}
+action = torch.randn(env.batch_size, N*3, device=device)  # predicted normals (flattened)
 obs, metrics, monitor = env.step(action)   # metrics: mse, dist, bound, alignment_loss
 print({k: float(v) for k, v in metrics.items()})
 ```
+
+*`obs['img']` is `(B, H, W)` (no channel); `obs['aux']` concatenates sun position (3) and ideal normals (N×3). Losses include MSE, distance-weighted error, boundary penalty, and an alignment loss in milliradians.*&#x20;
 
 ---
 
 ## Train a policy
 
-A reference training script with CNN encoder + (MLP/LSTM/Transformer) head, TensorBoard logging, LR schedulers, gradient clipping, and periodic 3D diagnostics.
+A reference training script with a CNN encoder + (MLP/LSTM/Transformer) head, TensorBoard logging, LR schedulers (plateau / cyclic / exponential), gradient clipping, error-focused masking, and periodic 3-D diagnostics.
 
 ```bash
-# default LSTM policy, single training batch, batch_size=25
+# default LSTM policy
 python train_with_env.py --device cuda --num_heliostats 50 --steps 5000
 
 # try a Transformer head
-python train_with_env.py --architecture transformer --transformer_layers 2 --transformer_heads 8
+python train_with_env.py --device cuda --architecture transformer --transformer_layers 2 --transformer_heads 8
 
-# ramp up misalignment pretraining
+# alignment pretraining before main losses
 python train_with_env.py --alignment_pretrain_steps 200 --alignment_f 150
 ```
 
-### Notable CLI knobs
+**Notable CLI knobs**
 
-* **Geometry & data**
-
-  * `--num_heliostats` (default 50), `--resolution` (128)
-  * `--batch_size` (25), `--num_batches` (1): number of *environment replicas* per step
-* **Loss scheduling**
-
-  * `--alignment_pretrain_steps` (100) & `--alignment_f` (100)
-  * `--warmup_steps` (40) using only boundary loss
-  * Post warm‑up blend of MSE and distance‑weighted errors (`--mse_f`, `--dist_f`)
-* **Schedulers**
-
-  * `--scheduler [exp|plateau|cyclic]`, with `--exp_decay`, or `--scheduler_patience/factor`, or `--step_size_up/down`
-* **Regularization**
-
-  * `--grad_clip` (default `1e-7`)
-  * `--use_error_mask` + `--error_mask_ratio`: focus losses on the worst‑k% images
-
-TensorBoard runs are written under `runs_multi_error_env/…`. Launch:
+* **Geometry & data**: `--num_heliostats` (50), `--resolution` (128), `--batch_size` (25), `--num_batches` (1).&#x20;
+* **Loss scheduling**: `--alignment_pretrain_steps` (100) with `--alignment_f` (100); `--warmup_steps` (40) using boundary-only; then blend MSE (`--mse_f`) and distance loss (`--dist_f`).&#x20;
+* **Schedulers**: `--scheduler [plateau|cyclic|exp]` with `--scheduler_*` or `--exp_decay`.&#x20;
+* **Regularization & stability**: `--grad_clip` (default `1e-7`), NaN/Inf forward/grad hooks, plus optional **error masking** via `--use_error_mask` & `--error_mask_ratio`.
+* **Logs & outputs**: TensorBoard logs under `runs_multi_error_env/...`; periodic 3-D plots (normals, reflected rays) saved to `./monitors_debug/step_XXX/…`.
 
 ```bash
 tensorboard --logdir runs_multi_error_env
@@ -162,13 +163,10 @@ tensorboard --logdir runs_multi_error_env
 
 ## Visual diagnostics (3D)
 
-`plotting_utils.scatter3d_vectors(...)` helps visualize:
+`plotting_utils.scatter3d_vectors(...)` writes standalone Plotly HTML:
 
-* predicted normals vs. **boundary violations**,
-* predicted normals vs. **per‑image MAE**,
-* reflected ray directions.
-
-The training script periodically writes standalone HTML plots under `./monitors_debug/step_XXX/…`, which you can open in any browser (even from remote machines via VS Code).
+* Predicted **normals** colored by boundary violations,
+* Predicted **normals** (or **reflected rays**) colored by per-image MAE.
 
 ---
 
@@ -187,67 +185,61 @@ HelioField(
     initial_action_noise: float = 0.01,         # noise for init actions
     resolution:          int = 100,
     device:              str|torch.device = "cpu",
-    max_batch_size:      int = 25,              # pre‑alloc error cache
+    max_batch_size:      int = 25,              # pre-alloc error cache
 )
 ```
 
-Methods (most used):
+Most-used methods:
 
 * `calculate_ideal_normals(sun_position) -> (N,3) or (B,N,3)`
 * `init_actions(sun_position) -> None` (stores `initial_action`)
-* `reset_errors() -> None` (resamples both single‑sun & batched error tensors)
-* `render(sun_position, action, monitor=False) ->`
+* `reset_errors() -> None` (resamples single-sun + batched error tensors)
+* `render(sun_position, action, ideal_normals, monitor=False) ->`
 
-  * if single sun: `(H,W), (N,3)` **or** `(H,W), (N,3), (H*N,3)` with `monitor=True`
-  * if batched: `(B,H,W), (B,N,3)` **or** `(B,H,W), (B,N,3), (B*N,3)`
+  * single sun: `(H,W), (N,3)` **or** `(H,W), (N,3), (H*N,3)` with `monitor=True`
+  * batched:    `(B,H,W), (B,N,3)` **or** `(B,H,W), (B,N,3), (B*N,3)`&#x20;
 
-Internals you might reuse:
+Internals you may reuse:
 
 * `reflect_vectors(incidents, normals)`
 * `ray_plane_intersection_batch(origins, dirs, plane_point, plane_normal)`
-* `gaussian_blur_batch(...)` → per‑mirror Gaussian footprints on the receiver
+* `gaussian_blur_batch(...)` → per-mirror Gaussian footprints on the receiver.&#x20;
 
-### `HelioEnv` (Gymnasium‑like)
+### `HelioEnv` (Gymnasium-like)
 
 Observations:
 
-* `obs['img']` : `(B, 1, H, W)` flux image(s)
-* `obs['aux']` : `(B, 3 + N*3)` → **sun position (3)** + **ideal normals (N\*3)**
+* `obs['img']` : `(B, H, W)` flux image(s)
+* `obs['aux']` : `(B, 3 + N*3)` → **sun position (3)** + **ideal normals (N×3)**&#x20;
 
 `step(action)`:
 
-* `action`: `(B, N*3)` flattened predicted normals (will be normalized)
-* returns `(obs, metrics, monitor)` where:
+* `action`: `(B, N*3)` flattened predicted normals (normalized inside).
+* Returns `(obs, metrics, monitor)` where **metrics** include:
 
-  * `metrics`:
-
-    * `mse` — image MSE (normalized by target peak),
-    * `dist` — distance‑weighted absolute error (uses EDT maps),
-    * `bound` — anti‑spillage penalty (outside receiver box),
-    * `alignment_loss` — mean angle (mrad) between ideal & actual normals.
-  * `monitor`:
-
-    * `normals`, `ideal_normals`, `reflected_rays`, `all_bounds`, `mae_image`
+  * `mse` — image MSE (normalized by target peak),
+  * `dist` — distance-weighted absolute error (via EDT),
+  * `bound` — anti-spillage penalty (inside a 75% receiver box),
+  * `alignment_loss` — mean angle (mrad) between ideal & actual normals.&#x20;
 
 ---
 
 ## Design notes & tips
 
-* **Deterministic errors across calls**: for batched calls, orientation error tensors are pre‑sampled up to `max_batch_size` and **reused** until `reset_errors()`. This makes debugging and curriculum schedules stable.
-* **Up‑axis safety**: a sigmoid constraint keeps the **Up component** of rotated normals non‑negative to avoid shooting into the ground.
-* **Distance‑aware loss**: errors far from the receiver center are penalized more (via Euclidean Distance Transform on a high‑flux mask).
-* **Boundary penalty**: encourages all intersections to lie within a **shrunk (75%) receiver box** (tunable), robust to rays nearly parallel to the plane.
+* **Deterministic errors across calls**: batched error tensors are pre-sampled up to `max_batch_size` and **reused** until `reset_errors()`—great for debugging and curriculum schedules.&#x20;
+* **Up-axis safety**: a leaky-ReLU constraint keeps the **Up (Z) component** of rotated normals non-negative to avoid shooting into the ground.&#x20;
+* **Distance-aware loss + masking**: errors far from the receiver center are penalized more (EDT maps), and you can focus on the worst-k% images via `use_error_mask`.&#x20;
 
 ---
 
 ## Troubleshooting
 
 * **NaNs/Infs during training**
-  The training loop registers forward/grad hooks and prints offenders. Check LR (`--lr`), `--grad_clip`, and whether you enabled an aggressive scheduler.
-* **All‑black images**
-  Ensure sun Z component is positive (upper hemisphere) and your normals aren’t flipped. In `HelioEnv`, sun directions are normalized and Z is forced ≥ 0.
-* **Mismatch shapes**
-  `action` must flatten to `(B, N*3)` and will be reshaped internally. Your policy should output unit normals or leave normalization to the env.
+  The training loop registers forward/grad hooks and prints offenders; also consider LR (`--lr`), `--grad_clip`, and scheduler aggressiveness.&#x20;
+* **All-black images**
+  Ensure sun Z component is positive and predicted normals aren’t flipped; `HelioEnv` samples sun directions in the upper hemisphere by construction.&#x20;
+* **Shape mismatches**
+  `action` must flatten to `(B, N*3)`; the env reshapes and normalizes internally. Images are `(B, H, W)` (add a channel dim yourself if your model expects one).&#x20;
 
 ---
 
@@ -267,11 +259,10 @@ If you use this simulator in academic work, please cite the repository (and, if 
 
 ## Acknowledgements
 
-Built as part of a research project on **RL for heliostat control in differentiable ray‑tracing simulators** at the German Aerospace Center (DLR).
+Built as part of a research project on **RL for heliostat control in differentiable ray-tracing simulators** at the German Aerospace Center (DLR).
 
-
------------
 <div align="center">
   <a href="https://www.dlr.de/EN/Home/home_node.html"><img src="https://www.dlr.de/static/media/Logo-en.bc10c5b6.svg" height="80px" hspace="3%" vspace="25px"></a>
-
 </div>
+
+
