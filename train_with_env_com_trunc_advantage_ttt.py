@@ -373,10 +373,28 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     targ_norm= torch.tensor([0., 1.,0.], device=dev)
     targ_area = (15.,15.)
     res=128
-    deg_diff = 2.0
+    deg_diff = 4.0
+    max_deg_elevation = 18.0
+    #vars for interpolation 
+        
+    avg_azimuth = 0
+    avg_elevation = 0
+
+    discard_first = 2
+
+    fine_steps_per_t = args.fine_steps_per_t
+
     # envs
     train_envs_list = []
     for i in range(args.num_batches):
+        azimuth = args.azimuth + i * deg_diff
+        if i >= discard_first:
+            avg_azimuth += azimuth/(args.num_batches-discard_first)
+
+        elevation = args.elevation + max_deg_elevation - np.abs(max_deg_elevation - i * deg_diff)    
+        if i >= discard_first:
+            avg_elevation += elevation/(args.num_batches-discard_first)
+
         train_env = HelioEnv(
             heliostat_pos = heliostat_pos,
             targ_pos = targ_pos,
@@ -393,8 +411,8 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             use_error_mask=args.use_error_mask, 
             error_mask_ratio=args.error_mask_ratio,
             exponential_risk=False,
-            azimuth=args.azimuth + i * deg_diff, 
-            elevation=args.elevation,
+            azimuth=azimuth, 
+            elevation=elevation,
         )
         train_env.seed(args.seed + i)
         #if not (i == 0):
@@ -416,8 +434,25 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         device=args.device,
         new_sun_pos_every_reset=False,
         new_errors_every_reset=False,
-        azimuth=args.azimuth, 
-        elevation=args.elevation,
+        azimuth=args.azimuth - 1.5 * deg_diff, 
+        elevation=args.elevation - 0.5 * deg_diff,
+    )
+
+    test_env_inter = HelioEnv(
+        heliostat_pos = heliostat_pos,
+        targ_pos = targ_pos,
+        targ_area = targ_area,
+        targ_norm = targ_norm,
+        sigma_scale=0.01,
+        error_scale_mrad=args.error_scale_mrad,
+        initial_action_noise=0.0,
+        resolution=res,
+        batch_size=test_size,
+        device=args.device,
+        new_sun_pos_every_reset=False,
+        new_errors_every_reset=False,
+        azimuth=avg_azimuth, 
+        elevation=avg_elevation,
     )
 
     #test_env.set_sun_pos(train_envs_list[0].sun_pos[:test_size])
@@ -509,7 +544,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             #opt.zero_grad()
             parts, pred_imgs, _, train_mse_over_t, monitor, _= rollout(train_env, policy,
                                 args.k, args.T, dev, use_mean=args.use_mean, truncate_every=args.truncate_every, detach_input = args.detach_input, 
-                                enable_fine = enable_fine)
+                                enable_fine = enable_fine, fine_steps_per_t = fine_steps_per_t)
 
             # ------------------------------------------------------------
             # Warm-up phase: rely solely on boundary loss to keep the flux
@@ -628,7 +663,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             policy.eval() # disable training time thingies 
             #with torch.no_grad():
             test_parts, _, _, test_mse_over_t, test_monitor, test_imgs_over_t = rollout(test_env, policy,
-                                        args.k, args.T+args.extra_steps, dev, enable_fine = enable_fine_test, test_time = True)
+                                        args.k, args.T+args.extra_steps, dev, enable_fine = enable_fine_test, test_time = True, fine_steps_per_t = fine_steps_per_t)
             policy.train() # enable training time thingies 
 
             # ▶ Save test heat-maps: run_name/step_<step>/idx_<i>/t_<t>.png
@@ -646,26 +681,76 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
                     out_path = os.path.join(idx_dir, f"t_{t:03d}.png")
                     plt.imsave(out_path, arr, cmap='inferno')  # inferno is great for heatmaps
 
-            print(f"[{step:4d}] loss {loss.detach():.4f} | "
-                  f"mse_train{parts['mse'].detach():.2e} dist_train {parts['dist'].detach():.2e} "
-                  f"bound_train {parts['bound'].detach():.2e} | test_mse {test_parts['mse'].detach():.2e} test_bound {test_parts['bound'].detach():.2e} test_alignment {test_parts['alignment_loss'].detach():.2e}")
+            print(f"[{step:4d}] | "
+                  f"test_mse_extrapolate {test_parts['mse'].detach():.2e} test_alignment_extrapolate {test_parts['alignment_loss'].detach():.2e}")
         
             scatter3d_vectors(
                 test_monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
                 test_monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
                 html_file=f'./monitors_debug/step_{step}/batch_{i}_test_r_mae_image.html')
 
+            
+            alignment_error_extrapolate = test_monitor['alignment_errors'].view([-1,]).detach().cpu().numpy()
+            alignment_error_extrapolate_path = f'./monitors_debug/step_{step}/alignment_errors_extrapolate.npy'
+            np.save(alignment_error_extrapolate_path, alignment_error_extrapolate)
+
+
             last_mse_loss = test_parts['mse'].item()
             best_mse_loss = last_mse_loss if best_mse_loss is None else min(best_mse_loss, last_mse_loss)
 
             # log test loss
             writer.add_scalar("mse/test", test_parts['mse'].detach(), step)
-            writer.add_scalar("bound/test", test_parts['bound'].detach(), step)
+            writer.add_scalar("alignment/test", test_parts['alignment_loss'].detach(), step)
 
             # log test mse over time for testing
             if step > (warmup_steps + pretrain_steps):
                 for t in range(args.T+args.extra_steps):
                     writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], args.T*step + t)
+
+
+            # get test loss (interpolation)
+
+            policy.eval() # disable training time thingies 
+            #with torch.no_grad():
+            test_parts, _, _, test_mse_over_t, test_monitor, test_imgs_over_t = rollout(test_env_inter, policy,
+                                        args.k, args.T+args.extra_steps, dev, enable_fine = enable_fine_test, test_time = True, fine_steps_per_t = fine_steps_per_t)
+            policy.train() # enable training time thingies 
+
+            # ▶ Save test heat-maps: run_name/step_<step>/idx_<i>/t_<t>.png
+            base_dir = os.path.join(run_name, f"inter_step_{step}")
+            os.makedirs(base_dir, exist_ok=True)
+
+            # test_imgs_over_t is a list of length (T+extra_steps), each (B,1,H,W) on CPU
+            for i in range(test_env.batch_size):
+                idx_dir = os.path.join(base_dir, f"idx_{i:03d}")
+                os.makedirs(idx_dir, exist_ok=True)
+
+                for t, frame in enumerate(test_imgs_over_t):
+                    # frame: (B,1,H,W) → select sample i, squeeze to (H,W)
+                    arr = frame[i].squeeze().numpy()
+                    out_path = os.path.join(idx_dir, f"t_{t:03d}.png")
+                    plt.imsave(out_path, arr, cmap='inferno')  # inferno is great for heatmaps
+
+            print(f"[{step:4d}] "
+                  f"test_mse_interepolate {test_parts['mse'].detach():.2e} test_alignment_interpolate {test_parts['alignment_loss'].detach():.2e}")
+
+
+            last_mse_loss = test_parts['mse'].item()
+            best_mse_loss = last_mse_loss if best_mse_loss is None else min(best_mse_loss, last_mse_loss)
+
+            # log test loss
+            writer.add_scalar("mse/test_interpolate", test_parts['mse'].detach(), step)
+            writer.add_scalar("alignment/test_interpolate", test_parts['alignment_loss'].detach(), step)
+
+            # write to numpy file for later analysis             
+            alignment_error_interpolate = test_monitor['alignment_errors'].view([-1,]).detach().cpu().numpy()
+            alignment_error_interpolate_path = f'./monitors_debug/step_{step}/alignment_errors_interpolate.npy'
+            np.save(alignment_error_interpolate_path, alignment_error_interpolate)
+
+            # log test mse over time for testing
+            if step > (warmup_steps + pretrain_steps):
+                for t in range(args.T+args.extra_steps):
+                    writer.add_scalar(f"mse/test_over_t_interpolate/", test_mse_over_t[t], args.T*step + t)
 
         writer.add_scalar("loss/total", loss.item(), step)
         writer.add_scalar("loss/mse",   parts['mse'].detach(), step)
@@ -700,8 +785,8 @@ if __name__=="__main__":
     
     
     p = argparse.ArgumentParser()
-    p.add_argument("--num_heliostats", type=int, default=50)
-    p.add_argument("--error_scale_mrad", type=float, default=90.0)
+    p.add_argument("--num_heliostats", type=int, default=1)
+    p.add_argument("--error_scale_mrad", type=float, default=5.0)
     p.add_argument("--heliostat_distance", type=float, default=1500.0)
     p.add_argument("--azimuth", type=float, default=15.0)
     p.add_argument("--elevation", type=float, default=45.0)
@@ -711,6 +796,7 @@ if __name__=="__main__":
     p.add_argument("--T",          type=int, default=6)
     p.add_argument("--k",          type=int, default=4)
     p.add_argument("--truncate_every",          type=int, default=5)
+    p.add_argument("--fine_steps_per_t",          type=int, default=10)
     p.add_argument("--fine_enabled", type=str, default="always",
                    help="enable fine adjustment block: none, test, always")
     p.add_argument("--detach_input", type=bool, default=True,
