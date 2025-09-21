@@ -15,6 +15,79 @@ from gymnasium import spaces
 # Helper functions
 #----------------------------------------------------------------------
 
+def azimuth_elevation_to_primary_direction(azimuth_deg: float,
+                                           elevation_deg: float,
+                                           device=None) -> torch.Tensor:
+    """
+    Convert azimuth and elevation angles (in degrees) into a 3D unit direction vector.
+
+    Args:
+        azimuth_deg:   Azimuth angle in degrees (0° = +X axis, increases CCW towards +Y).
+        elevation_deg: Elevation angle in degrees (0° = horizon, 90° = zenith).
+        device:        Torch device for the output tensor (optional).
+
+    Returns:
+        Tensor of shape (3,) representing the direction vector.
+    """
+    az = math.radians(azimuth_deg)
+    el = math.radians(elevation_deg)
+
+    x = math.cos(el) * math.cos(az)
+    y = math.cos(el) * math.sin(az)
+    z = math.sin(el)
+
+    vec = torch.tensor([x, y, z], dtype=torch.float32, device=device)
+    return vec / torch.norm(vec)
+
+def sample_cone_directions(
+    n: int,
+    axis: torch.Tensor,          # shape: (3,)
+    half_angle_deg: float,
+    device=None,
+    force_upper_hemisphere: bool = False
+) -> torch.Tensor:
+    """
+    Uniformly sample 'n' unit vectors on the spherical cap (cone) defined by:
+      - central axis 'axis' (any non-zero 3D vector)
+      - half-angle 'half_angle_deg'
+
+    Returns: (n, 3) tensor of unit vectors.
+    """
+    device = device or axis.device
+    a = F.normalize(axis.to(device), dim=0)
+    alpha = math.radians(half_angle_deg)
+
+    # Build an orthonormal basis {u, v, a}
+    # Pick a helper not (nearly) parallel to 'a'
+    helper = torch.tensor([0.0, 0.0, 1.0], device=device)
+    if torch.abs(a[2]) > 0.999:  # if almost parallel to z, switch helper
+        helper = torch.tensor([0.0, 1.0, 0.0], device=device)
+
+    u = F.normalize(torch.cross(helper, a), dim=0)
+    v = torch.cross(a, u)
+
+    # Sample uniformly on spherical cap:
+    # cos(theta) ~ Uniform[cos(alpha), 1], phi ~ Uniform[0, 2π)
+    u01 = torch.rand(n, device=device)
+    cos_theta = 1.0 - u01 * (1.0 - math.cos(alpha))
+    sin_theta = torch.sqrt(torch.clamp(1.0 - cos_theta**2, min=0.0))
+    phi = 2.0 * math.pi * torch.rand(n, device=device)
+
+    # Construct directions in {u, v, a} basis
+    dirs = (
+        u[None, :] * (sin_theta * torch.cos(phi))[:, None] +
+        v[None, :] * (sin_theta * torch.sin(phi))[:, None] +
+        a[None, :] *  cos_theta[:, None]
+    )
+    dirs = F.normalize(dirs, dim=1)
+
+    if force_upper_hemisphere:
+        # Note: this slightly distorts the exact cone if the cone dips below z=0.
+        dirs[:, 2] = torch.abs(dirs[:, 2])
+
+    return dirs
+
+
 # distance loss function
 def make_distance_maps(imgs, thr=0.5):
     maps = []
@@ -56,7 +129,32 @@ def boundary(vects,
     else:
         return (dist*(~inside).float())
 
-#Alignment loss 
+def calculate_angles_mrad(
+        v1: torch.Tensor,
+        v2: torch.Tensor,
+        epsilon: float = 1e-10
+) -> torch.Tensor:
+    # in case v1 or v2 have shape (4,), bring to (1, 4)
+    v1 = v1.unsqueeze(0) if v1.dim() == 1 else v1
+    v2 = v2.unsqueeze(0) if v2.dim() == 1 else v2
+
+    m1 = v1.double() #torch.norm(v1, dim=-1)
+    m2 = v2.double() #torch.norm(v2, dim=-1)
+    
+    dot_products = torch.sum(v1 * v2, dim=-1)
+    cos_angles = dot_products
+    
+    # safest upper bound just below 1 using nextafter
+    one = torch.tensor(1.0, dtype=cos_angles.dtype, device=cos_angles.device)
+    upper = torch.nextafter(one, torch.tensor(0.0, dtype=cos_angles.dtype, device=cos_angles.device))
+    lower = -upper  # symmetric
+
+    angles_rad = torch.acos(
+        torch.clamp(cos_angles, min=lower.item()+epsilon, max=upper.item()-epsilon)
+    )
+    return angles_rad * 1000
+
+""" #Alignment loss 
 def calculate_angles_mrad(
         v1: torch.Tensor,
         v2: torch.Tensor,
@@ -69,11 +167,9 @@ def calculate_angles_mrad(
     m1 = torch.norm(v1, dim=-1)
     m2 = torch.norm(v2, dim=-1)
     dot_products = torch.sum(v1 * v2, dim=-1)
-    cos_angles = dot_products / (m1 * m2 + epsilon)
-    angles_rad = torch.acos(
-        torch.clamp(cos_angles, min= -1.0 + 1e-7, max= 1.0 - 1e-7)
-    )
-    return angles_rad * 1000
+    angles_rad = 1-dot_products
+    return angles_rad * 1000 """
+
 
 
 class HelioEnv(gym.Env):
@@ -94,7 +190,9 @@ class HelioEnv(gym.Env):
                  use_error_mask=False, 
                  error_mask_ratio=0.2,
                  exponential_risk=False, 
-                 single_sun=True,
+                 single_sun=False,
+                 azimuth = 45.0, 
+                 elevation = 45.0, 
                 ):
         super(HelioEnv, self).__init__()
 
@@ -113,9 +211,13 @@ class HelioEnv(gym.Env):
 
         # Geometry setup
         self.heliostat_pos = heliostat_pos
+        self.num_heliostats =  heliostat_pos.shape[0]
         self.targ_pos = targ_pos
         self.targ_area = targ_area
         self.targ_norm = targ_norm
+
+        self.azimuth = azimuth 
+        self.elevation = elevation
 
         # Error parameters
         self.sigma_scale = sigma_scale
@@ -131,6 +233,8 @@ class HelioEnv(gym.Env):
         # Flags for resetting conditions
         self.new_sun_pos_every_reset = new_sun_pos_every_reset
         self.new_errors_every_reset = new_errors_every_reset
+
+        self.single_sun = single_sun
 
         # Action space and observation space setup
         action_dim = heliostat_pos.shape[0] * 3
@@ -178,15 +282,83 @@ class HelioEnv(gym.Env):
 
 
         # precompute distance maps
-        if single_sun: 
-            sun_dirs = F.normalize(torch.randn(1,3,device=self.device),dim=1)
-            sun_dirs = sun_dirs.repeat(self.batch_size, 1)   # shape: (batch_size, 3)
+        # --- config knobs ---
+        if (self.azimuth == None) or (self.elevation == None):
+            use_cone = False
         else:
-            sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device),dim=1)
-        #make sure sun is always in the upper hemisphere (U coordinate is always positive)
-        sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
-        radius   = math.hypot(1000,1000)
-        self.sun_pos  = sun_dirs*radius
+            use_cone = True
+            primary_dir = azimuth_elevation_to_primary_direction(azimuth_deg = self.azimuth,
+                                            elevation_deg = self.elevation,
+                                            device=self.device).to(self.device) # example: pointing "up"
+        half_angle_deg = 2.0                                             # small cone (tune as needed)
+        force_upper = True                                               # mimic your abs(z) behavior
+
+        if use_cone:
+            if single_sun:
+                # one direction, copy across the batch
+                sun_dirs = sample_cone_directions(
+                    n=1,
+                    axis=primary_dir,
+                    half_angle_deg=half_angle_deg,
+                    device=self.device,
+                    force_upper_hemisphere=force_upper
+                ).repeat(self.batch_size, 1)
+            else:
+                # one independent direction per batch element
+                sun_dirs = sample_cone_directions(
+                    n=self.batch_size,
+                    axis=primary_dir,
+                    half_angle_deg=half_angle_deg,
+                    device=self.device,
+                    force_upper_hemisphere=force_upper
+                )
+        else:
+            # your old fallback
+            if single_sun:
+                sun_dirs = F.normalize(torch.randn(1,3,device=self.device), dim=1).repeat(self.batch_size, 1)
+            else:
+                sun_dirs = F.normalize(torch.randn(self.batch_size,3,device=self.device), dim=1)
+            sun_dirs[:, 2] = torch.abs(sun_dirs[:, 2])
+
+        # Position the suns at a fixed range from origin
+        radius  = math.hypot(1000, 1000)
+        sun_pos = sun_dirs * radius
+        self.set_sun_pos(sun_pos)
+
+
+        #exponential risk 
+        self.exponential_risk = exponential_risk
+
+    def set_sun_pos_from_azimuth_elevation(self, azimuth_deg: float,
+                                           elevation_deg: float,
+                                           device=None):
+                                           
+        primary_dir = azimuth_elevation_to_primary_direction(azimuth_deg = self.azimuth,
+                                                    dlevation_deg = self.elevation,
+                                                    device=self.device).to(self.device) # example: pointing "up"
+
+        if self.single_sun:
+            # one direction, copy across the batch
+            sun_dirs = sample_cone_directions(
+                n=1,
+                axis=primary_dir,
+                half_angle_deg=half_angle_deg,
+                device=self.device,
+                force_upper_hemisphere=force_upper
+            ).repeat(self.batch_size, 1)
+        else:
+            # one independent direction per batch element
+            sun_dirs = sample_cone_directions(
+                n=self.batch_size,
+                axis=primary_dir,
+                half_angle_deg=half_angle_deg,
+                device=self.device,
+                force_upper_hemisphere=force_upper
+            )
+
+    def set_sun_pos(self, sun_positions:torch.Tensor):
+        #sets current sun positions to the one in the arguments (useful for evaluating test performance)
+        self.sun_pos = sun_positions.clone().detach()
 
         self.ref_field.init_actions(self.sun_pos)
         with torch.no_grad():
@@ -196,13 +368,6 @@ class HelioEnv(gym.Env):
 
         self.ref_min = torch.min(timg)
         self.ref_max = torch.max(timg)
-
-        #exponential risk 
-        self.exponential_risk = exponential_risk
-
-    def set_sun_pos(self, sun_positions:torch.Tensor):
-        #sets current sun positions to the one in the arguments (useful for evaluating test performance)
-        self.sun_pos = sun_positions.clone().detach()
 
     def reset(self):
         """
@@ -229,6 +394,7 @@ class HelioEnv(gym.Env):
             img, _ = self.noisy_field.render(self.sun_pos, init_action, ideal_normals)
 
         ideal_normals = self.ref_field.calculate_ideal_normals(self.sun_pos)
+        self.ideal_normals = ideal_normals
         aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
 
         return {'img': img, 'aux': aux}
@@ -255,7 +421,7 @@ class HelioEnv(gym.Env):
                                     )
 
         # Compute auxiliary input
-        aux = torch.cat([self.sun_pos, ideal_normals.flatten(1)], dim=1)
+        aux = torch.cat([self.sun_pos.detach(), action.flatten(1)], dim=1)
 
         # Compute losses
         mx = img.amax((1,2), keepdim=True).clamp_min(1e-6)

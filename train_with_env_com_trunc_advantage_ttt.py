@@ -5,6 +5,7 @@ comparison of target vs predicted heat-maps (plus error) for one example.
 """
 
 import math, argparse
+import os 
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
 print(torch.__version__)
@@ -17,6 +18,8 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 from adamp import AdamP
+
+from layers.center_of_mass import CenterOfMass2D
 
 from test_environment import HelioEnv  # your multi-error env
 from plotting_utils import scatter3d_vectors
@@ -36,22 +39,17 @@ def log_if_nan(tensor, name):
             log_if_nan(t, f"{name}[{i}]")
 
 # ---------------------------------------------------------------------------
-class CNNEncoder(nn.Module):
+class COMEncoder(nn.Module):
     def __init__(self, in_channels: int, out_dim: int=128, dropout=0.1):
         super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 5, padding=2), nn.GELU(),
-            nn.Dropout2d(dropout),
-            nn.Conv2d(32, 64, 5, padding=2),          nn.GELU(),
-            nn.Dropout2d(dropout),
-            nn.Conv2d(64, 128,5, padding=2),          nn.GELU(),
-            nn.Dropout2d(dropout),
-            nn.AdaptiveAvgPool2d((1,1))
-        )
-        self.proj = nn.Linear(128, out_dim)
+        self.com = CenterOfMass2D()
+        self.proj = nn.Sequential(
+            nn.Linear(2, out_dim), 
+            nn.Dropout(dropout)
+            )
 
     def forward(self, x):
-        feat = self.cnn(x).flatten(1)
+        feat = self.com(x)
         return F.gelu(self.proj(feat))
 # ---------------------------------------------------------------------------
 
@@ -83,7 +81,7 @@ class PolicyNet(nn.Module):
         self.arch = architecture.lower()
 
         # shared CNN encoder
-        self.encoder = CNNEncoder(img_channels, enc_dim, dropout=dropout)
+        self.encoder = COMEncoder(img_channels, enc_dim, dropout=dropout)
 
         if self.arch == 'lstm':
             if not use_lstm:
@@ -161,59 +159,205 @@ class PolicyNet(nn.Module):
         normals = self.head(x)                 # (B, num_h*3)
         normals = normals.view(B, self.num_h, 3)
 
-        normals = F.normalize(normals, dim=2)
+        #normals = F.normalize(normals, dim=2)
 
         return normals, hx
 
 #TODO See if ther is a problem with the dimensions of the input image
 #NOTE Apparently not but with k=T, we're not utilizing the power of the LSTM
 # ---------------------------------------------------------------------------
-def rollout(env, policy, k, T, device, use_mean=False):
-    """Run T steps, return dict of {mse, dist, bound} on final frame."""
+def rollout(
+    env,
+    policy,
+    k,
+    T,
+    device,
+    truncate_every=None,
+    use_mean=False,
+    detach_input=False,
+    # --- TTC / test-time compute options ---
+    enable_fine: bool = False,
+    fine_adjustment_start_t: int = 6,
+    fine_from_t0: bool = False,
+    fine_steps_per_t: int = 10,
+    fine_lr: float = 1e-4,
+    fine_weight_decay: float = 0.0,
+    fine_grad_clip: float | None = None,
+    dist_fraction: float = 0.85,
+    freeze_policy_during_fine: bool = True,
+    fine_init_eps: float = 1e-4, 
+    test_time: bool = False,
+):
+    """
+    Run T steps and (optionally) perform test-time compute by optimizing a persistent
+    fine_error_vec to nudge the normals toward lower distance/MSE.
+
+    If enable_fine is True:
+      - Create/keep a learnable fine_error_vec with shape (B, N, 3).
+      - At each t >= start (or from t=0 if fine_from_t0), run an inner optimization loop
+        over fine_error_vec ONLY (policy frozen by default) for 'fine_steps_per_t' steps.
+      - For the first `dist_fraction` of timesteps after the start, minimize 'dist';
+        afterward, minimize 'mse'.
+      - Apply: normals = normalize(base_normals + fine_error_vec, dim=2)
+    """
     B = env.batch_size
-    # init noisy actions & first image
     with torch.no_grad():
         state_dict = env.reset()
-        img = state_dict['img']            # (B,1,H,W)
-        aux = state_dict['aux']            # (B, aux_dim)
+        img = state_dict['img']          # (B,1,H,W)
+        aux = state_dict['aux']          # (B, aux_dim)
 
     # history buffer
     res = env.resolution
     hist = torch.zeros(B, k, res, res, device=device)
     hist[:, -1] = img.clone()
 
-    #mean loss dict
-    mean_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0, 'alignment_loss': 0,}
+    truncated_loss_dict = {'mse': 0, 'dist': 0, 'bound': 0, 'alignment_loss': 0}
+    previous_reward = 0
     mse_over_t = []
+    imgs_over_t = []
 
     hx = None
-    for _ in range(T):
-        net_img = hist.unsqueeze(2)           # (B,k,1,H,W)
+    prev_normals = None
 
-        normals, hx = policy(net_img.detach(), aux.detach(), hx)
+    # --- TTC state (constructed lazily when needed) ---
+    fine_error_vec = None
+    fine_opt = None
 
-        state_dict, loss_dict, monitor = env.step(normals)  
+    if (truncate_every is not None):
+        n_truncs = (T // truncate_every)
+        coef_pow = 4.0
+        coef_div = np.sum(np.arange(n_truncs) ** coef_pow)
 
-        if use_mean:
-            # accumulate losses
-            mean_loss_dict['mse'] = mean_loss_dict['mse'] + (1/T) * loss_dict['mse']
-            mean_loss_dict['dist'] = mean_loss_dict['dist'] + (1/T) * loss_dict['dist']
-            mean_loss_dict['bound'] = mean_loss_dict['bound'] + (1/T) * loss_dict['bound']
-            mean_loss_dict['alignment_loss'] = mean_loss_dict['alignment_loss'] + (1/T) * loss_dict['alignment_loss']
+    # Decide the time-based schedule boundary between dist and mse
+    # For t in [start, T): optimize 'dist' for first 75% of those steps, then 'mse'.
+    start_t = 0 if (enable_fine and fine_from_t0) else fine_adjustment_start_t
+    switch_t = start_t + int(max(0, T - start_t) * dist_fraction)
+
+    for t in range(T):
+        net_img = hist.unsqueeze(2)  # (B,k,1,H,W)
+
+        # ---- Policy forward (as in your original) ----
+        if not test_time:
+            if prev_normals is None:
+                if detach_input:
+                    base_normals, hx = policy(net_img.detach(), aux.detach(), hx)
+                else:
+                    base_normals, hx = policy(net_img, aux, hx)
+                base_normals = F.normalize(base_normals, dim=2)
+                prev_normals = base_normals
+            else:
+                if detach_input or ((truncate_every is not None) and ((t + 1) % truncate_every == 1)):
+                    base_normals, hx = policy(net_img.detach(), aux.detach(), hx)
+                else:
+                    base_normals, hx = policy(net_img, aux, hx)
+                base_normals = F.normalize(base_normals + prev_normals, dim=2)
+                prev_normals = base_normals
+        else:
+            with torch.no_grad():
+                if prev_normals is None:
+                    if detach_input:
+                        base_normals, hx = policy(net_img.detach(), aux.detach(), hx)
+                    else:
+                        base_normals, hx = policy(net_img, aux, hx)
+                    base_normals = F.normalize(base_normals, dim=2)
+                    prev_normals = base_normals
+                else:
+                    if detach_input or ((truncate_every is not None) and ((t + 1) % truncate_every == 1)):
+                        base_normals, hx = policy(net_img.detach(), aux.detach(), hx)
+                    else:
+                        base_normals, hx = policy(net_img, aux, hx)
+                    base_normals = F.normalize(base_normals + prev_normals, dim=2)
+                    prev_normals = base_normals
+
+        normals_to_apply = base_normals
+
+        # ---- Test-Time Compute (fine adjustment) ----
+        should_fine = enable_fine and (t >= start_t or (fine_from_t0 and t >= 0))
+        if should_fine:
+            # Initialize persistent fine_error_vec/optimizer lazily
+            if fine_error_vec is None:
+                # shape: (B, N, 3) where N = env.num_heliostats inferred from base_normals
+                fine_error_vec = torch.empty_like(base_normals).uniform_(
+                                -fine_init_eps, fine_init_eps
+                            ).requires_grad_()
+
+                fine_opt = torch.optim.Adam([fine_error_vec], lr=fine_lr, weight_decay=fine_weight_decay)
+
+            # Choose current objective (time-based schedule across rollout)
+            objective_key = 'dist' #if t < switch_t else 'mse'
+            # make sure fine_error_vec is a leaf with grad
+            fine_error_vec.requires_grad_(True)
+            # Inner optimization loop over fine_error_vec ONLY
+            for _ in range(fine_steps_per_t):
+                fine_opt.zero_grad(set_to_none=True)
+
+                # Optionally block gradients to policy during TTC
+                if freeze_policy_during_fine:
+                    _base = base_normals.detach()
+                else:
+                    _base = base_normals
+
+                candidate = F.normalize(_base + fine_error_vec, dim=2)
+
+                # Allowed to call env.step here (per your note). We do NOT use alignment loss for TTC.
+                _, _losses, _ = env.step(candidate)
+
+                loss_inner = _losses[objective_key]
+                # Strictly optimize fine_error_vec
+                loss_inner.backward()
+
+                if fine_grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_([fine_error_vec], max_norm=fine_grad_clip)
+
+                fine_opt.step()
+
+            # After inner optimization, apply the adjusted normals for the real transition
+            normals_to_apply = F.normalize(base_normals + fine_error_vec, dim=2)
+
+        # ---- Environment transition for the actual rollout step ----
+        prev_normals = normals_to_apply
+        state_dict, loss_dict, monitor = env.step(normals_to_apply)
+
+        # --- Truncated-grad logic (unchanged from your version) ---
+        if (truncate_every is not None):
+            coeff = 1 / (T // truncate_every)
+
+            truncated_loss_dict['alignment_loss'] = truncated_loss_dict['alignment_loss'] + (
+                -loss_dict['alignment_loss'] - previous_reward
+            )
+            previous_reward = -loss_dict['alignment_loss'].detach()
+
+            if (t == (T - 1)) or ((t + 1) % truncate_every == 0):
+                truncated_loss_dict['mse'] = 0 * truncated_loss_dict['mse'] + loss_dict['mse']
+                truncated_loss_dict['dist'] = truncated_loss_dict['dist'] + coeff * loss_dict['dist']
+                truncated_loss_dict['bound'] = truncated_loss_dict['bound'] + coeff * loss_dict['bound']
+
+                # Detach recurrent state
+                if isinstance(hx, tuple):
+                    hx = tuple(h.detach() for h in hx)
+                elif torch.is_tensor(hx):
+                    hx = hx.detach()
+
+                aux = state_dict['aux']
+            else:
+                aux = state_dict['aux']
+        else:
+            aux = state_dict['aux']
 
         mse_over_t.append(loss_dict['mse'].item())
 
-
         img = state_dict['img']            # (B,1,H,W)
+        imgs_over_t.append(img.detach().cpu())
+
         hist = torch.roll(hist, -1, dims=1)
         hist[:, -1] = img
 
-    #scatter3d_vectors(monitor['normals'].view([-1, 3]).detach().cpu().numpy(), monitor['all_bounds'].view([-1,1]).detach().cpu().numpy())
+    truncated_loss_dict['alignment_loss'] = -truncated_loss_dict['alignment_loss']
 
-    if use_mean:
-        return mean_loss_dict, img, hist, mse_over_t, monitor
+    if (truncate_every is not None):
+        return truncated_loss_dict, img, hist, mse_over_t, monitor, imgs_over_t
     else:
-        return loss_dict, img, hist, mse_over_t, monitor
+        return loss_dict, img, hist, mse_over_t, monitor, imgs_over_t
 
 # ---------------------------------------------------------------------------
 def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = True):
@@ -224,12 +368,12 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     # geometry
     N = args.num_heliostats
     # heliostat positions
-    heliostat_pos = torch.rand(N,3,device=dev)*10 + 80; heliostat_pos[:,2]=0
+    heliostat_pos = torch.rand(N,3,device=dev) + np.sqrt(args.heliostat_distance); heliostat_pos[:,2]=0
     targ_pos = torch.tensor([0.,-5.,0.],device=dev)
     targ_norm= torch.tensor([0., 1.,0.], device=dev)
     targ_area = (15.,15.)
     res=128
-
+    deg_diff = 2.0
     # envs
     train_envs_list = []
     for i in range(args.num_batches):
@@ -249,10 +393,12 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             use_error_mask=args.use_error_mask, 
             error_mask_ratio=args.error_mask_ratio,
             exponential_risk=False,
+            azimuth=args.azimuth + i * deg_diff, 
+            elevation=args.elevation,
         )
         train_env.seed(args.seed + i)
-        if not (i == 0):
-            train_env.set_sun_pos(train_envs_list[0].sun_pos) 
+        #if not (i == 0):
+        #    train_env.set_sun_pos(train_envs_list[0].sun_pos) 
         train_envs_list.append(train_env)
 
     # envs
@@ -270,16 +416,18 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         device=args.device,
         new_sun_pos_every_reset=False,
         new_errors_every_reset=False,
+        azimuth=args.azimuth, 
+        elevation=args.elevation,
     )
 
-    test_env.set_sun_pos(train_envs_list[0].sun_pos[:test_size])
+    #test_env.set_sun_pos(train_envs_list[0].sun_pos[:test_size])
 
     # model + opt
     aux_dim = 3+N*3
     policy = PolicyNet(img_channels=1, num_heliostats=N, aux_dim=aux_dim, architecture= args.architecture,
                         lstm_hid=args.lstm_hid,
                         transformer_layers=args.transformer_layers,
-                        transformer_heads=args.transformer_heads,).to(device=dev)  
+                        transformer_heads=args.transformer_heads, dropout=args.dropout).to(device=dev)  
 
     # register anomaly hooks
     for n, p in policy.named_parameters():
@@ -314,11 +462,27 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
     #writer = SummaryWriter(f"runs_multi_error_env/{datetime.now():%m%d_%H%M%S}")
 
+    # Assume you already created the env earlier
+    sun_pos = test_env.sun_pos.detach().cpu().numpy().tolist()  # convert tensor → JSON-serializable
+
+    params = vars(args).copy()
+    params.update({
+        "sun_pos": sun_pos,
+    })
+
+    run_name = f"run_{datetime.now():%m%d_%H%M%S}"
     writer = MLflowWriter(
         experiment_id="1490651313414470",
-        run_name=f"run_{datetime.now():%m%d_%H%M%S}",
-        params=vars(args)  # logs all CLI args as MLflow params
+        run_name=run_name,
+        params=params
     )
+
+    # run_name = f"run_{datetime.now():%m%d_%H%M%S}"     # ▶ keep the run name for folders
+    # writer = MLflowWriter(
+    #     experiment_id="1490651313414470",
+    #     run_name=run_name,
+    #     params=vars(args)
+    # )
 
     last_boundary_loss = None
     last_mse_loss = None
@@ -328,14 +492,24 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
     last_alignment_loss = np.inf
     best_alignment_loss = np.inf
 
+    # before: for step in range(args.steps + pretrain_steps):
+    prev_total_loss = None  # <-- add this line
+
     for step in range(args.steps + pretrain_steps):
         # get batch of envs
+        if args.fine_enabled == 'always':
+            start_fine_adjustment_at = 50
+            enable_fine = step > start_fine_adjustment_at 
+        else:
+            enable_fine = False
+
         opt.zero_grad(set_to_none=True)
         for i in range(args.num_batches):
             train_env = train_envs_list[i]
             #opt.zero_grad()
-            parts, pred_imgs, _, train_mse_over_t, monitor= rollout(train_env, policy,
-                                args.k, args.T, dev, use_mean=args.use_mean)
+            parts, pred_imgs, _, train_mse_over_t, monitor, _= rollout(train_env, policy,
+                                args.k, args.T, dev, use_mean=args.use_mean, truncate_every=args.truncate_every, detach_input = args.detach_input, 
+                                enable_fine = enable_fine)
 
             # ------------------------------------------------------------
             # Warm-up phase: rely solely on boundary loss to keep the flux
@@ -367,7 +541,16 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
                         #+ anti_spill*parts['bound'])
 
-            (loss/args.num_batches).backward()
+            # Objective: maximize decrease in loss
+            if prev_total_loss is None:
+                objective = loss  # first update: fall back to standard minimization
+            else:
+                objective = loss - prev_total_loss.detach()  # minimize (current - previous)
+
+            (objective / args.num_batches).backward()
+
+            # track for next iteration (no grad through the baseline)
+            prev_total_loss = loss.detach()
 
             # if loss is NaN, print current lr
             if torch.isnan(loss):
@@ -434,7 +617,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
         '''
         bad_suns = [train_env.sun_pos[i].detach().cpu().numpy() for i in range(50) if pred_imgs[i].amax() > 0.005]; good_suns = [train_env.sun_pos[i].detach().cpu().numpy() for i in range(50) if pred_imgs[i].amax() < 0.005]; import pandas as pd; pd.DataFrame({'value': good_suns + bad_suns, 'source': ['good'] * len(good_suns) + ['bad'] * len(bad_suns)}).to_csv('labeled_list.csv', index=False)
         '''
-
+        enable_fine_test = (args.fine_enabled == 'always') or (args.fine_enabled == 'test') 
         if step%100==0 or step==args.steps-1:
             #print average gradients wrt. params
             for name, param in policy.named_parameters():
@@ -443,10 +626,25 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             # get test loss
 
             policy.eval() # disable training time thingies 
-            with torch.no_grad():
-                test_parts, _, _, test_mse_over_t, test_monitor = rollout(test_env, policy,
-                                           args.k, args.T, dev)
+            #with torch.no_grad():
+            test_parts, _, _, test_mse_over_t, test_monitor, test_imgs_over_t = rollout(test_env, policy,
+                                        args.k, args.T+args.extra_steps, dev, enable_fine = enable_fine_test, test_time = True)
             policy.train() # enable training time thingies 
+
+            # ▶ Save test heat-maps: run_name/step_<step>/idx_<i>/t_<t>.png
+            base_dir = os.path.join(run_name, f"step_{step}")
+            os.makedirs(base_dir, exist_ok=True)
+
+            # test_imgs_over_t is a list of length (T+extra_steps), each (B,1,H,W) on CPU
+            for i in range(test_env.batch_size):
+                idx_dir = os.path.join(base_dir, f"idx_{i:03d}")
+                os.makedirs(idx_dir, exist_ok=True)
+
+                for t, frame in enumerate(test_imgs_over_t):
+                    # frame: (B,1,H,W) → select sample i, squeeze to (H,W)
+                    arr = frame[i].squeeze().numpy()
+                    out_path = os.path.join(idx_dir, f"t_{t:03d}.png")
+                    plt.imsave(out_path, arr, cmap='inferno')  # inferno is great for heatmaps
 
             print(f"[{step:4d}] loss {loss.detach():.4f} | "
                   f"mse_train{parts['mse'].detach():.2e} dist_train {parts['dist'].detach():.2e} "
@@ -466,7 +664,7 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
             # log test mse over time for testing
             if step > (warmup_steps + pretrain_steps):
-                for t in range(args.T):
+                for t in range(args.T+args.extra_steps):
                     writer.add_scalar(f"mse/test_over_t/", test_mse_over_t[t], args.T*step + t)
 
         writer.add_scalar("loss/total", loss.item(), step)
@@ -504,14 +702,25 @@ if __name__=="__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--num_heliostats", type=int, default=50)
     p.add_argument("--error_scale_mrad", type=float, default=90.0)
+    p.add_argument("--heliostat_distance", type=float, default=1500.0)
+    p.add_argument("--azimuth", type=float, default=15.0)
+    p.add_argument("--elevation", type=float, default=45.0)
     p.add_argument("--batch_size", type=int, default=25)
     p.add_argument("--num_batches", type=int, default=1)
     p.add_argument("--steps",      type=int, default=5000)
-    p.add_argument("--T",          type=int, default=4)
+    p.add_argument("--T",          type=int, default=6)
     p.add_argument("--k",          type=int, default=4)
+    p.add_argument("--truncate_every",          type=int, default=5)
+    p.add_argument("--fine_enabled", type=str, default="always",
+                   help="enable fine adjustment block: none, test, always")
+    p.add_argument("--detach_input", type=bool, default=True,
+                   help="Whether to stop gradients from flowing theough the input of the network")
+    p.add_argument("--extra_steps",          type=int, default=20)
     p.add_argument("--lr",         type=float, default=2e-4)
     p.add_argument("--device",     type=str, default="cpu")
     p.add_argument("--use_lstm",     type=bool, default=False)
+    p.add_argument("--dropout", type=float, default=0.3,
+                   help="dropout rate")
     p.add_argument("--grad_clip",  type=float, default=1e-7, 
                    help="Gradient clipping threshold.")
     p.add_argument("--architecture", type=str, default="lstm",

@@ -1,0 +1,8 @@
+numpy
+torch
+scipy
+matplotlib
+plotly
+gymnasium
+tensorboard
+adamp
