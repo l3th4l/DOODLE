@@ -250,7 +250,14 @@ def main():
 
     # Plan runs: one-at-a-time sweeps over ANALYZE
     planned = []
+    count = 1
     for prop, values in ANALYZE.items():
+        if args.start_at >= 0 and count < args.start_at:
+            print(f"Skipping analysis of {prop} (count {count}) due to --start_at {args.start_at}")
+            count += 1
+            continue
+        print(f"Planning analysis of {prop} (count {count}) with values: {values}")
+        count += 1
         for val in values:
             for seed in SEEDS:
                 planned.append((prop, val, seed))
