@@ -613,31 +613,31 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
 
             
             #save plots of normals and losses every k'th step 
-            if (step % 50 == 0) or step == args.steps-1:
-                scatter3d_vectors(
-                    monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_bounds.html')
+            # if (step % 50 == 0) or step == args.steps-1:
+            #     scatter3d_vectors(
+            #         monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
+            #         monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
+            #         html_file=f'./monitors_debug/step_{step}/batch_{i}_bounds.html')
 
-                scatter3d_vectors(
-                    monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image.html')
+            #     scatter3d_vectors(
+            #         monitor['normals'].view([-1, 3]).detach().cpu().numpy(), 
+            #         monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
+            #         html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image.html')
                 
-                scatter3d_vectors(
-                    monitor['ideal_normals'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image_ideal.html')
+            #     scatter3d_vectors(
+            #         monitor['ideal_normals'].view([-1, 3]).detach().cpu().numpy(), 
+            #         monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
+            #         html_file=f'./monitors_debug/step_{step}/batch_{i}_mae_image_ideal.html')
                     
-                scatter3d_vectors(
-                    monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_r_bounds.html')
+            #     scatter3d_vectors(
+            #         monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
+            #         monitor['all_bounds'].view([-1,]).detach().cpu().numpy(),
+            #         html_file=f'./monitors_debug/step_{step}/batch_{i}_r_bounds.html')
 
-                scatter3d_vectors(
-                    monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                    monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                    html_file=f'./monitors_debug/step_{step}/batch_{i}_r_mae_image.html')
+            #     scatter3d_vectors(
+            #         monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
+            #         monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
+            #         html_file=f'./monitors_debug/step_{step}/batch_{i}_r_mae_image.html')
         # ------------------------------------------------------------
         # log train and test loss
 
@@ -684,10 +684,10 @@ def train_and_eval(args, plot_heatmaps_in_tensorboard = True, return_best_mse = 
             print(f"[{step:4d}] | "
                   f"test_mse_extrapolate {test_parts['mse'].detach():.2e} test_alignment_extrapolate {test_parts['alignment_loss'].detach():.2e}")
         
-            scatter3d_vectors(
-                test_monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
-                test_monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
-                html_file=f'./monitors_debug/step_{step}/batch_{i}_test_r_mae_image.html')
+            # scatter3d_vectors(
+            #     test_monitor['reflected_rays'].view([-1, 3]).detach().cpu().numpy(), 
+            #     test_monitor['mae_image'].view([-1,]).detach().cpu().numpy(),
+            #     html_file=f'./monitors_debug/step_{step}/batch_{i}_test_r_mae_image.html')
 
             
             alignment_error_extrapolate = test_monitor['alignment_errors'].view([-1,]).detach().cpu().numpy()
