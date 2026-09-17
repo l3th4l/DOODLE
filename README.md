@@ -10,6 +10,8 @@ A tiny, fast, **differentiable ray-tracing simulator** inspired by [ARTIST](http
 
 This repo is designed for research on **closed-loop control** of heliostats in **concentrated solar power (CSP) tower** plants. It renders irradiance (“flux”) images on a planar receiver, supports per-episode error sampling, and exposes clean hooks for RL / supervised training.
 
+> Read the Master Thesis : [Reinforcement Learning for Heliostat Control in Solar Tower Power Plants](https://elib.dlr.de/218953/)
+
 ---
 
 ## What’s inside
@@ -248,10 +250,13 @@ Observations:
 If you use this simulator in academic work, please cite the repository (and, if applicable, your thesis on heliostat control with differentiable ray tracing).
 
 ```
-@software{heliostat_differentiable_sim,
-  title  = {Differentiable Heliostat Optics Simulator (DOODLE)},
-  year   = {2025},
-  note   = {GitHub repository},
+@mastersthesis{dlr218953,
+          school = {Friedrich-Alexander-Universit{\"a}t Erlangen-N{\"u}rnberg},
+           month = {September},
+          author = {Pal, Safalya},
+           title = {Reinforcement Learning for Heliostat Control in Solar Tower Power Plants},
+            year = {2025},
+             url = {https://elib.dlr.de/218953/}
 }
 ```
 
